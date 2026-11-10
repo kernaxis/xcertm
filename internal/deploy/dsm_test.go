@@ -31,7 +31,7 @@ func newDSM(t *testing.T) dsmLayout {
 	// A real script exercises exec, error propagation, and replay. It records
 	// only synthetic service names and never prints or records key material.
 	write(t, filepath.Join(scripts, "system"), []byte("#!/bin/sh\nbase=${0%/*}\nprintf '%s\\n' \"$1\" >> \"$base/calls\"\nif [ -f \"$base/fail-$1\" ]; then exit 9; fi\n"), 0700)
-	return dsmLayout{root, t.TempDir(), archive, scripts, dsm.Config{DestinationID: "nas", UseDefault: true, Root: root}}
+	return dsmLayout{root, privateTempDir(t), archive, scripts, dsm.Config{DestinationID: "nas", UseDefault: true, Root: root}}
 }
 
 func (l dsmLayout) dirs() []string {
@@ -81,7 +81,7 @@ func TestDSMDeployAndRecoverFailedService(t *testing.T) {
 			t.Fatal("obsolete chain was not removed")
 		}
 	}
-	if other, err := dsm.Open(t.TempDir(), l.config); err == nil {
+	if other, err := dsm.Open(privateTempDir(t), l.config); err == nil {
 		other.Close()
 		t.Fatal("another state root bypassed pending DSM owner")
 	}
@@ -218,7 +218,7 @@ func TestDSMCertificateIDForeignMarkerAndSharedLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second, err := dsm.Open(t.TempDir(), l.config); err == nil {
+	if second, err := dsm.Open(privateTempDir(t), l.config); err == nil {
 		second.Close()
 		t.Fatal("shared archive lock bypassed")
 	}

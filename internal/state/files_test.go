@@ -12,6 +12,36 @@ import (
 	"github.com/kernaxis/xcertm/internal/state"
 )
 
+func TestPrivateDirPermissions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mode    os.FileMode
+		allowed bool
+	}{
+		{"private", 0700, true},
+		{"world-readable", 0755, false},
+		{"group-writable", 0770, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Chmod(dir, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			err := state.PrivateDir(dir)
+			if (err == nil) != tc.allowed {
+				t.Fatalf("PrivateDir with permissions %04o: %v", tc.mode, err)
+			}
+			info, err := os.Stat(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != tc.mode {
+				t.Fatal("existing directory permissions were changed")
+			}
+		})
+	}
+}
+
 func TestAtomicWriteFailurePreservesExistingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(path, []byte("old"), 0600); err != nil {

@@ -17,7 +17,7 @@ import (
 )
 
 func TestFilesystemDeploymentAndRenewedGeneration(t *testing.T) {
-	root, dir := t.TempDir(), t.TempDir()
+	root, dir := privateTempDir(t), t.TempDir()
 	write(t, filepath.Join(dir, "unrelated"), []byte("keep"), 0644)
 	s, err := filesystem.Open(root, filesystem.Config{DestinationID: "web", Directory: dir})
 	if err != nil {
@@ -71,7 +71,7 @@ func TestFilesystemDeploymentAndRenewedGeneration(t *testing.T) {
 func TestFilesystemRecoversEveryBoundary(t *testing.T) {
 	for _, point := range []string{"prepared", "file-0", "file-1", "group-files"} {
 		t.Run(point, func(t *testing.T) {
-			root, dir := t.TempDir(), t.TempDir()
+			root, dir := privateTempDir(t), t.TempDir()
 			config := filesystem.Config{DestinationID: "web", Directory: dir}
 			s, err := filesystem.Open(root, config)
 			if err != nil {
@@ -109,7 +109,7 @@ func TestFilesystemRecoversEveryBoundary(t *testing.T) {
 func TestFilesystemConflictPreflight(t *testing.T) {
 	for _, kind := range []string{"content", "mode", "stage", "directory", "journal", "metadata"} {
 		t.Run(kind, func(t *testing.T) {
-			root, dir := t.TempDir(), t.TempDir()
+			root, dir := privateTempDir(t), t.TempDir()
 			config := filesystem.Config{DestinationID: "web", Directory: dir}
 			s, err := filesystem.Open(root, config)
 			if err != nil {
@@ -166,7 +166,7 @@ func TestFilesystemConflictPreflight(t *testing.T) {
 }
 
 func TestFilesystemDetectsDriftAndRejectsUntrackedFiles(t *testing.T) {
-	root, dir := t.TempDir(), t.TempDir()
+	root, dir := privateTempDir(t), t.TempDir()
 	config := filesystem.Config{DestinationID: "web", Directory: dir}
 	write(t, filepath.Join(dir, "fullchain.pem"), []byte("operator file"), 0600)
 	s, err := filesystem.Open(root, config)
@@ -192,13 +192,13 @@ func TestFilesystemDetectsDriftAndRejectsUntrackedFiles(t *testing.T) {
 }
 
 func TestFilesystemLocksPendingOwnershipAndIndependentTargets(t *testing.T) {
-	root, a, b := t.TempDir(), t.TempDir(), t.TempDir()
+	root, a, b := privateTempDir(t), t.TempDir(), t.TempDir()
 	config := filesystem.Config{DestinationID: "a", Directory: a}
 	first, err := filesystem.Open(root, config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if other, err := filesystem.Open(t.TempDir(), filesystem.Config{DestinationID: "other", Directory: a}); err == nil {
+	if other, err := filesystem.Open(privateTempDir(t), filesystem.Config{DestinationID: "other", Directory: a}); err == nil {
 		other.Close()
 		t.Fatal("resource lock bypassed")
 	}
@@ -219,7 +219,7 @@ func TestFilesystemLocksPendingOwnershipAndIndependentTargets(t *testing.T) {
 		t.Fatal("expected interruption")
 	}
 	first.Close()
-	if other, err := filesystem.Open(t.TempDir(), filesystem.Config{DestinationID: "other", Directory: a}); err == nil {
+	if other, err := filesystem.Open(privateTempDir(t), filesystem.Config{DestinationID: "other", Directory: a}); err == nil {
 		other.Close()
 		t.Fatal("pending ownership bypassed")
 	}
@@ -247,7 +247,7 @@ func TestFilesystemLocksPendingOwnershipAndIndependentTargets(t *testing.T) {
 func TestFilesystemRejectsRetargetSymlinksAndBadNames(t *testing.T) {
 	for _, kind := range []string{"retarget", "symlink", "filename", "same-name"} {
 		t.Run(kind, func(t *testing.T) {
-			root, dir := t.TempDir(), t.TempDir()
+			root, dir := privateTempDir(t), t.TempDir()
 			config := filesystem.Config{DestinationID: "a", Directory: dir}
 			if kind == "filename" {
 				config.KeyFile = "../key"
@@ -291,7 +291,7 @@ func TestFilesystemRejectsRetargetSymlinksAndBadNames(t *testing.T) {
 }
 
 func TestFilesystemMissingJournalAndCancellation(t *testing.T) {
-	root, dir := t.TempDir(), t.TempDir()
+	root, dir := privateTempDir(t), t.TempDir()
 	s, err := filesystem.Open(root, filesystem.Config{DestinationID: "a", Directory: dir})
 	if err != nil {
 		t.Fatal(err)
@@ -321,7 +321,7 @@ func TestFilesystemMissingJournalAndCancellation(t *testing.T) {
 }
 
 func TestFilesystemCrashReleasesLocks(t *testing.T) {
-	root, dir := t.TempDir(), t.TempDir()
+	root, dir := privateTempDir(t), t.TempDir()
 	config := filesystem.Config{DestinationID: "crash", Directory: dir}
 	s, err := filesystem.Open(root, config)
 	if err != nil {

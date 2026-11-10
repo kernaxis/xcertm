@@ -57,6 +57,16 @@ func generation(t *testing.T, id string, noChain bool) domain.Generation {
 	return g
 }
 
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	// TempDir permissions depend on the process umask; state requires 0700.
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func mkdir(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0700); err != nil {

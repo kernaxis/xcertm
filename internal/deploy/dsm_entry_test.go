@@ -136,7 +136,7 @@ func TestDSMAutomaticEntryRecoversEveryCreationBoundary(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(l.archive, ".xcertm-dsm-create")); err == nil {
 				foreign := l.config
 				foreign.DestinationID = "other"
-				if other, err := dsm.Open(t.TempDir(), foreign); err == nil {
+				if other, err := dsm.Open(privateTempDir(t), foreign); err == nil {
 					other.Close()
 					t.Fatal("another store bypassed pending creation")
 				}
