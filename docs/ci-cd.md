@@ -84,6 +84,12 @@ The result is a **draft**, not an automatically published release. Review its
 notes/assets in GitHub before publishing it. `-rc.N` versions are marked as
 prereleases. No server or NAS deployment is part of these workflows.
 
+The installer and `xcertm update` discover only published stable releases.
+Publishing a draft makes it eligible for discovery; merely creating the tag or
+running Release does not. Both consume the existing archive names and
+`SHA256SUMS`; no separate build or publication workflow is required. See
+[installation and updates](installation.md).
+
 ## Binary archives
 
 | Archive suffix | Target |

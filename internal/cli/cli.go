@@ -45,6 +45,7 @@ func Run(ctx context.Context, args []string, version string, stdout, stderr io.W
 		},
 	}
 	command.Commands = append(command.Commands, lifecycleCommands()...)
+	command.Commands = append(command.Commands, updateCommand(version))
 
 	if err := command.Run(ctx, args); err != nil {
 		fmt.Fprintf(stderr, "xcertm: %v\n", err)

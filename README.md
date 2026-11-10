@@ -11,9 +11,34 @@ as private files. YAML is optional; there is no database or required daemon.
 XCertM does not depend on Lego or a Synolego installation.
 
 **Early development:** automated tests cover local ACME/provider servers and
-simulated DSM layouts. Real Let's Encrypt/provider integration and actual NAS
-compatibility have not yet been validated. Remote deployment and certificate
-imports are not supported.
+simulated DSM layouts. Validate your setup with Let's Encrypt staging before
+using production certificates. Remote deployment and certificate imports are
+not supported.
+
+## Install and update
+
+On Linux or Synology DSM, install the latest published stable release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kernaxis/xcertm/main/install.sh | sudo sh
+xcertm --version
+```
+
+The installer selects Linux amd64, 386, ARMv7 or ARM64, verifies the release
+SHA-256 checksum, and installs `/usr/local/bin/xcertm` with license notices under
+`/usr/local/share/doc/xcertm/<version>`. It needs a published stable release;
+drafts and release candidates are excluded. Without `sudo`, it defaults to
+`$HOME/.local/bin`. DSM deployment requires root privileges.
+
+```sh
+sudo xcertm update         # Show versions and path, then ask for confirmation
+xcertm update --check     # Check only; no installation privileges required
+sudo xcertm update --yes   # Explicitly authorize installation without a prompt
+```
+
+Updates replace the running binary after verification and leave configuration
+and certificate state untouched. See [installation and updates](docs/installation.md)
+for prerequisites, a pinned version, custom paths, and recovery.
 
 ## Build
 

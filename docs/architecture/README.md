@@ -10,6 +10,7 @@ There is no database, daemon, plugin loader, DI framework, or empty future packa
 | --- | --- |
 | `cmd/xcertm` | Process entry point, injectable version, exit code; calls `cli`. |
 | `internal/cli` | Flags, request assembly, presentation; uses typed `config` and `app`, never performs ACME/DNS/deployment operations itself. |
+| `internal/update` | Public release discovery, checksum verification, retained license notices, installation locking and executable replacement; standard library only, without certificate configuration or store dependencies. Called directly by `cli`. |
 | `internal/config` | Strict optional YAML, typed inputs, path resolution, validation, secret references, resolver selection; uses domain name validation. |
 | `internal/domain` | Immutable generations, certificate/key/chain coherence, exact DNS SAN comparison; standard library only. |
 | `internal/app` | Renewal policy, lifecycle orchestration, independent destinations, public inspection; explicitly assembles ACME/DNS/deployment adapters and store. |
@@ -25,6 +26,7 @@ There is no database, daemon, plugin loader, DI framework, or empty future packa
 flowchart TD
     CLI[CLI] --> Config[Typed configuration]
     CLI --> App[Lifecycle orchestration]
+    CLI --> Update[Release updater]
     App --> ACME[ACME adapter]
     ACME --> Protocol[x/crypto/acme]
     ACME --> DNS[DNS-01 coordinator]
@@ -124,13 +126,16 @@ does not roll back automatically. See [deployment details](deployment.md).
 
 ## Scope and verification
 
-Implemented commands are `issue`, `renew`, `deploy`, `list`, `show`, help and version.
+Implemented commands are `issue`, `renew`, `deploy`, `list`, `show`, `update`, help and version.
 Optional YAML/flags, Let's Encrypt, Cloudflare, OVH, and both local deployment
 targets are wired together. Tests exercise HTTP/JWS issuance with the real ACME
 library, signed provider requests, wildcard coexistence, key rotation, loss of
 responses, retained generations, partial deployment, replay, and read-only CLI.
 
-Public-service integration and DSM hardware compatibility remain unverified.
+Automated tests use local services and simulated DSM layouts; they do not prove
+compatibility with every NAS or live provider configuration. Installer/updater
+tests use local release servers and temporary installation prefixes. See
+[installation and updates](../installation.md) for the distribution trust model.
 Remote deployment, import, account migration,
 revocation, automatic cleanup/GC, CNAME challenge delegation, and Linux service
 management are outside this MVP. Dependency and license details are in
