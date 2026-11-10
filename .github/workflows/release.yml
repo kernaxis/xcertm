@@ -1,0 +1,210 @@
+name: Release
+'on':
+  push:
+    tags:
+    - v*
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Version to release, e.g. v1.0.0 or v1.1.0-rc.1 (new tag created after successful builds)
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      sha: ${{ steps.tag.outputs.sha }}
+      create_tag: ${{ steps.tag.outputs.create_tag }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+    - name: Validate version and release commit
+      run: |
+        set -euo pipefail
+        if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$ ]]; then
+          echo 'Expected vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rc.N' >&2
+          exit 1
+        fi
+        if [[ "$EVENT_NAME" == workflow_dispatch && "$SOURCE_REF" != refs/heads/main ]]; then
+          echo 'Run this workflow from main' >&2
+          exit 1
+        fi
+        create_tag=false
+        if git show-ref --verify --quiet "refs/tags/$TAG"; then
+          sha=$(git rev-parse --verify "refs/tags/$TAG^{commit}")
+          if [[ "$EVENT_NAME" == push ]]; then
+            event_sha=$(git rev-parse --verify "$SOURCE_SHA^{commit}")
+            if [[ "$sha" != "$event_sha" ]]; then
+              echo 'The tag no longer matches the triggering commit' >&2
+              exit 1
+            fi
+          fi
+        elif [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+          sha=$(git rev-parse --verify "$SOURCE_SHA^{commit}")
+          create_tag=true
+        else
+          echo 'The pushed tag no longer exists' >&2
+          exit 1
+        fi
+        git merge-base --is-ancestor "$sha" refs/remotes/origin/main
+        printf 'tag=%s\nsha=%s\ncreate_tag=%s\n' "$TAG" "$sha" "$create_tag" >> "$GITHUB_OUTPUT"
+      env:
+        TAG: ${{ inputs.tag || github.ref_name }}
+        EVENT_NAME: ${{ github.event_name }}
+        SOURCE_REF: ${{ github.ref }}
+        SOURCE_SHA: ${{ github.sha }}
+      id: tag
+  ci:
+    needs: validate
+    uses: ./.github/workflows/ci.yml # zizmor: ignore[self-repository] -- Same-commit relative call; actionlint does not support the newer $/ syntax.
+    with:
+      ref: ${{ needs.validate.outputs.sha }}
+  security:
+    needs: validate
+    uses: ./.github/workflows/security.yml # zizmor: ignore[self-repository] -- Same-commit relative call; actionlint does not support the newer $/ syntax.
+    with:
+      ref: ${{ needs.validate.outputs.sha }}
+      release: true
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    needs:
+    - validate
+    - ci
+    - security
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+        - amd64
+        - '386'
+        - arm
+        - arm64
+    env:
+      VERSION: ${{ needs.validate.outputs.tag }}
+      GOOS: linux
+      GOARCH: ${{ matrix.arch }}
+      GOARM: '7'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+        ref: ${{ needs.validate.outputs.sha }}
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache: false
+    - name: Install license packaging tool for the runner
+      run: GOOS="$(go env GOHOSTOS)" GOARCH="$(go env GOHOSTARCH)" CGO_ENABLED=0 go install github.com/google/go-licenses/v2@v2.0.1
+    - run: make package
+    - name: Smoke-test native binary
+      if: matrix.arch == 'amd64'
+      run: |
+        binary="dist/xcertm_${VERSION#v}_linux_amd64/xcertm"
+        "$binary" --version | grep -Fx "xcertm version $VERSION"
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: release-${{ needs.validate.outputs.sha }}-${{ github.run_attempt }}-${{ matrix.arch }}
+        path: dist/*.tar.gz
+        if-no-files-found: error
+        retention-days: 7
+  publish-draft:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs:
+    - validate
+    - build
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.validate.outputs.tag }}
+      SHA: ${{ needs.validate.outputs.sha }}
+      CREATE_TAG: ${{ needs.validate.outputs.create_tag }}
+    steps:
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        pattern: release-${{ needs.validate.outputs.sha }}-${{ github.run_attempt }}-*
+        merge-multiple: true
+        path: dist
+    - name: Verify all archives and generate checksums
+      run: |
+        set -euo pipefail
+        cd dist
+        version="${TAG#v}"
+        expected=()
+        for arch in amd64 386 armv7 arm64; do
+          expected+=("xcertm_${version}_linux_${arch}.tar.gz")
+        done
+        for file in "${expected[@]}"; do test -s "$file"; done
+        count=$(find . -maxdepth 1 -type f -name '*.tar.gz' | wc -l)
+        test "$count" -eq 4
+        sha256sum "${expected[@]}" > SHA256SUMS
+        sha256sum --check SHA256SUMS
+    - name: Check release status and prepare tag
+      run: |
+        python3 - <<'PY_CHECK'
+        import json, os, urllib.error, urllib.request
+        base = os.environ['GH_API_URL'] + '/repos/' + os.environ['GH_REPO']
+        headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'}
+
+        def api(path, data=None, missing_ok=False):
+            body = None if data is None else json.dumps(data).encode()
+            request = urllib.request.Request(base + path, data=body, headers=headers)
+            if data is not None:
+                request.add_header('Content-Type', 'application/json')
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    result = json.load(response)
+                    if not isinstance(result, (dict, list)):
+                        raise SystemExit('Unexpected release API response')
+                    return result
+            except urllib.error.HTTPError as error:
+                if missing_ok and error.code == 404:
+                    return None
+                raise SystemExit('Release preparation failed: HTTP ' + str(error.code))
+
+        page = 1
+        while True:
+            releases = api('/releases?per_page=100&page=' + str(page))
+            if not isinstance(releases, list):
+                raise SystemExit('Unexpected release API response')
+            if any(release.get('tag_name') == os.environ['TAG'] for release in releases):
+                raise SystemExit('A release or draft already exists for this tag; no assets will be overwritten')
+            if len(releases) < 100:
+                break
+            page += 1
+
+        ref = api('/git/ref/tags/' + os.environ['TAG'], missing_ok=True)
+        if ref is None:
+            if os.environ['CREATE_TAG'] != 'true':
+                raise SystemExit('The existing release tag was deleted; it will not be recreated')
+            api('/git/refs', {'ref': 'refs/tags/' + os.environ['TAG'], 'sha': os.environ['SHA']})
+        else:
+            target = ref['object']
+            while target['type'] == 'tag':
+                target = api('/git/tags/' + target['sha'])['object']
+            if target['type'] != 'commit' or target['sha'] != os.environ['SHA']:
+                raise SystemExit('The release tag no longer points to the validated commit')
+        PY_CHECK
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        GH_API_URL: ${{ github.api_url }}
+    - name: Create draft release
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        args=(--draft --verify-tag --generate-notes --target "$SHA" --title "XCertM $TAG")
+        if [[ "$TAG" == *-rc.* ]]; then args+=(--prerelease); fi
+        gh release create "$TAG" "${args[@]}" dist/*.tar.gz dist/SHA256SUMS

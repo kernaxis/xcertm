@@ -1,0 +1,54 @@
+version: 1
+
+# Optional. Otherwise /var/lib/xcertm on Linux, /usr/local/share/xcertm on DSM.
+# state_dir: /custom/private/xcertm
+
+acme:
+  environment: staging  # Change to production after testing.
+  email: admin@example.com
+  accept_tos: true
+
+dns_providers:
+  cloudflare-main:
+    type: cloudflare
+    zone: example.com
+    api_token_env: CLOUDFLARE_API_TOKEN
+    # Alternatively, replace api_token_env with api_token: "YOUR_TOKEN".
+    # A YAML file containing api_token must have mode 0600 or 0400.
+
+  ovh-main:
+    type: ovh
+    endpoint: ovh-eu
+    zone: example.net
+    application_key_env: OVH_APPLICATION_KEY
+    application_secret_env: OVH_APPLICATION_SECRET
+    consumer_key_env: OVH_CONSUMER_KEY
+
+destinations:
+  web-local:
+    type: filesystem
+    directory: /etc/nginx/tls/example.com
+
+  nas-main:
+    type: dsm
+    # No selector: create a dedicated entry once and reuse its generated ID.
+    # Alternatives: certificate_id: ABC123 or default: true (existing entries).
+
+  api-local:
+    type: filesystem
+    directory: /etc/nginx/tls/api.example.net
+
+certificates:
+  web:
+    domains:
+      - example.com
+      - "*.example.com"
+    dns_provider: cloudflare-main
+    destinations: [web-local, nas-main]
+    # Optional. Default is the final third of the certificate's lifetime.
+    # renew_before: 20d
+
+  api:
+    domains: [api.example.net]
+    dns_provider: ovh-main
+    destinations: [api-local]

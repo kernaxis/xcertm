@@ -1,0 +1,32 @@
+# Build and release output.
+/xcertm
+/xcertm.exe
+/dist/
+
+# Test coverage and profiles.
+/coverage.out
+/coverage.html
+/*.test
+/*.prof
+/*.pprof
+
+# Python packaging-tool caches.
+__pycache__/
+*.py[cod]
+
+# Local configuration and credentials; examples/ remains versioned.
+/xcertm.yaml
+/xcertm.yml
+/xcertm-*.yaml
+/xcertm-*.yml
+/cloudflare-token
+/cloudflare-token.*
+/.env
+/.env.*
+!/.env.example
+/secrets/
+
+# Optional in-repository stores selected with --state-dir or state_dir.
+/state/
+/xcertm-state/
+/xcertm-test-state/

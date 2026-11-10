@@ -1,0 +1,79 @@
+name: Security
+'on':
+  pull_request:
+    branches:
+    - main
+  push:
+    branches:
+    - main
+  workflow_dispatch: null
+  schedule:
+  - cron: 17 5 * * *
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        default: ''
+      release:
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: security-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  govulncheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    name: govulncheck (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(inputs.release && '["amd64","386","arm","arm64"]' || '["amd64"]') }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+        ref: ${{ inputs.ref || github.sha }}
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+    - name: Install govulncheck
+      run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+    - name: Check reachable vulnerabilities
+      run: make vulncheck
+      env:
+        GOOS: linux
+        GOARCH: ${{ matrix.arch }}
+        GOARM: '7'
+        CGO_ENABLED: '0'
+        GOFLAGS: -mod=readonly
+  workflow-security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    if: github.event_name != 'schedule'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+        ref: ${{ inputs.ref || github.sha }}
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+    - run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+    - run: actionlint
+    - name: Check workflow security
+      run: |
+        python3 -m venv "$RUNNER_TEMP/zizmor"
+        "$RUNNER_TEMP/zizmor/bin/pip" install --disable-pip-version-check zizmor==1.32.0
+        "$RUNNER_TEMP/zizmor/bin/zizmor" --offline .github/workflows
+  dependency-review:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    if: github.event_name == 'pull_request'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
