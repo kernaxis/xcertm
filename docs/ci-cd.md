@@ -1,7 +1,7 @@
 # CI and releases
 
 GitHub Actions uses the Go version declared in `go.mod`, including the preferred
-Go 1.26.10 toolchain. Tests use local fixtures and need no Cloudflare, OVH, ACME
+Go 1.26.11 toolchain. Tests use local fixtures and need no Cloudflare, OVH, ACME
 account, or NAS credentials. The workflows target `main`.
 
 ## Workflows

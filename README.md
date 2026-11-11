@@ -43,7 +43,7 @@ for prerequisites, a pinned version, custom paths, and recovery.
 ## Build
 
 Use Go **1.26 or newer**, as required by the selected `golang.org/x/crypto`
-release. `go.mod` selects Go 1.26.10 as the preferred build toolchain. No
+release. `go.mod` selects Go 1.26.11 as the preferred build toolchain. No
 additional build framework is needed.
 
 ```sh

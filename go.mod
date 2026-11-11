@@ -2,7 +2,7 @@ module github.com/kernaxis/xcertm
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	github.com/urfave/cli/v3 v3.14.0
