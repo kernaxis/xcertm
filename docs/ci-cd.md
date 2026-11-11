@@ -59,7 +59,8 @@ Workflow security uses `zizmor==1.32.0`, installed in an isolated Python
 environment, with `zizmor --offline .github/workflows`. Offline mode avoids
 GitHub API lookups by the workflow auditor; it does not disable its local audits.
 The optional Makefile invokes the same Go checks as the direct commands in the
-README. `coverage.out` and `dist/` are generated files and are ignored by Git.
+[development guide](development.md). `coverage.out` and `dist/` are generated
+files and are ignored by Git.
 
 ## Release contract
 
