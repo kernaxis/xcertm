@@ -778,6 +778,23 @@ func TestIssueToDSMAndFilesystemWithFailedReloadRecovery(t *testing.T) {
 	if len(out.Deployments) != 2 || !out.Deployments[0].Completed || out.Deployments[1].Completed {
 		t.Fatalf("invalid independent results: %+v", out)
 	}
+	if len(out.Deployments[1].Services) != 1 || !out.Deployments[1].Services[0].FilesPublished || out.Deployments[1].Services[0].Activation != "callback-failed" {
+		t.Fatal("partial DSM service outcome missing", out.Deployments[1])
+	}
+	for _, args := range [][]string{{"list"}, {"show", "web"}, {"show", "web", "--json"}} {
+		var stdout, stderr strings.Builder
+		argv := append([]string{"xcertm", "--state-dir", root, "--staging"}, args...)
+		if code := cli.Run(context.Background(), argv, "test", &stdout, &stderr); code != 0 {
+			t.Fatalf("partial deployment cannot be inspected: %s", &stderr)
+		}
+		if args[0] == "list" {
+			if !strings.Contains(stdout.String(), "nas-main:partial@") {
+				t.Fatal("partial deployment not distinguished from untouched pending work", &stdout)
+			}
+		} else if !strings.Contains(stdout.String(), "callback-failed") {
+			t.Fatal("service callback outcome missing from show", &stdout)
+		}
+	}
 	if err := os.Remove(fail); err != nil {
 		t.Fatal(err)
 	}
@@ -790,6 +807,9 @@ func TestIssueToDSMAndFilesystemWithFailedReloadRecovery(t *testing.T) {
 	}
 	if out.State != "recovered" || l.finalizations != 1 {
 		t.Fatal("recovery caused another issuance")
+	}
+	if len(out.Deployments) != 1 || len(out.Deployments[0].Services) != 1 || out.Deployments[0].Services[0].Activation != "callback-succeeded" {
+		t.Fatal("recovered callback outcome not reported", out.Deployments)
 	}
 	for _, dir := range []string{filepath.Join(archive, "ABC123"), service} {
 		data, err := os.ReadFile(filepath.Join(dir, "fullchain.pem"))

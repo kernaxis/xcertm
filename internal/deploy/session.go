@@ -53,6 +53,15 @@ func StateDirectory(root, destinationID string) string {
 type Result struct {
 	OperationID, DestinationID, CertificateID, GenerationID string
 	Completed                                               bool
+	Services                                                []ServiceResult `json:"services,omitempty"`
+}
+
+// ServiceResult reports file publication and callback execution, not live
+// process health or the certificate currently served by an application.
+type ServiceResult struct {
+	Name           string `json:"name"`
+	FilesPublished bool   `json:"files_published"`
+	Activation     string `json:"activation"`
 }
 
 type owner struct {
@@ -213,7 +222,36 @@ func result(j *state.Journal) Result {
 	if j == nil {
 		return Result{}
 	}
-	return Result{OperationID: j.OperationID, DestinationID: j.DestinationID, CertificateID: j.CertificateID, GenerationID: j.GenerationID}
+	r := Result{OperationID: j.OperationID, DestinationID: j.DestinationID, CertificateID: j.CertificateID, GenerationID: j.GenerationID}
+	for _, group := range j.Groups {
+		if group.Reload == "" {
+			continue
+		}
+		activation := group.Activation
+		if activation == "" {
+			activation = "pending"
+			if group.Done {
+				activation = "callback-succeeded"
+			}
+		}
+		r.Services = append(r.Services, ServiceResult{group.Name, group.Published || group.Done, activation})
+	}
+	return r
+}
+
+// Inspect reads recorded outcomes without taking deployment locks, creating a
+// missing store, or probing/reloading live services.
+func Inspect(stateRoot, destinationID string) (Result, error) {
+	j, err := (&state.Store{Dir: StateDirectory(stateRoot, destinationID)}).Load()
+	if err != nil || j == nil {
+		return Result{}, err
+	}
+	if j.DestinationID != destinationID {
+		return Result{}, errors.New("deployment receipt has a different destination identity")
+	}
+	r := result(j)
+	r.Completed = j.Completed()
+	return r, nil
 }
 
 func (s *Session) Recover(ctx context.Context) (Result, error) {
@@ -250,9 +288,13 @@ func (s *Session) Recover(ctx context.Context) (Result, error) {
 	}
 	s.configure(ctx)
 	if err := s.store.Replay(); err != nil {
-		r := result(j)
+		latest, loadErr := s.store.Load()
+		if loadErr != nil {
+			latest = j
+		}
+		r := result(latest)
 		r.Completed = false
-		return r, err
+		return r, errors.Join(err, loadErr)
 	}
 	if err := s.release(j.OperationID); err != nil {
 		return result(j), err

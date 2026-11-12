@@ -178,6 +178,34 @@ your configuration and credential files. Do not delete it between runs. See
 [storage settings](architecture/configuration.md#store-selection-and-permissions)
 if you need another location.
 
+## Partial DSM deployments
+
+If a DSM callback fails, XCertM continues with the other assigned services and
+reports `partial` with a nonzero exit code. Each service shows whether its files
+were published and whether its callback succeeded, failed, was unavailable or
+is still pending. Check the details with:
+
+```sh
+sudo xcertm show web
+```
+
+`callback-succeeded` means the DSM callback completed successfully. It does not
+verify that the service is running or that clients see the new certificate.
+Native package TLS reloaders are preferred when DSM declares them; older
+packages and built-in services can use their legacy callbacks.
+
+After resolving an activation error, repeat the deployment with the same
+configuration:
+
+```sh
+sudo xcertm deploy --config ./xcertm.yaml --certificate web
+```
+
+XCertM keeps the same certificate and retries only unfinished callbacks. Do not
+delete the saved state or request another certificate to resolve a service
+reload error. See [deployment and recovery](architecture/deployment.md#dsm-target)
+for callback selection, remaining limitations and journal compatibility.
+
 ## Without a configuration file
 
 All certificate operations also accept command-line options. For example, with

@@ -22,11 +22,23 @@ type Guard struct {
 	Before Snapshot `json:"before"`
 }
 type Group struct {
-	Name   string `json:"name"`
-	Files  []int  `json:"files"`
-	Reload string `json:"reload,omitempty"`
-	Done   bool   `json:"done"`
+	Name       string `json:"name"`
+	Files      []int  `json:"files"`
+	Reload     string `json:"reload,omitempty"`
+	Published  bool   `json:"published,omitempty"`
+	Activation string `json:"activation,omitempty"`
+	Done       bool   `json:"done"`
 }
+
+// ActivationError identifies a service-local failure. Integrity, configuration
+// conflicts and cancellation must remain ordinary errors and stop replay.
+type ActivationError struct {
+	Err       error
+	Attempted bool
+}
+
+func (e *ActivationError) Error() string { return e.Err.Error() }
+func (e *ActivationError) Unwrap() error { return e.Err }
 
 // Journal is private operational state, not a user configuration format.
 // A completed journal remains the receipt for the latest observed deployment.
@@ -124,7 +136,7 @@ func (s *Store) Load() (*Journal, error) {
 }
 
 func structure(j *Journal) error {
-	if j.Version != 1 || !strings.HasPrefix(j.Stage, "operation-") || filepath.Base(j.Stage) != j.Stage || strings.ContainsAny(j.Stage, "\\\x00") {
+	if (j.Version != 1 && j.Version != 2) || !strings.HasPrefix(j.Stage, "operation-") || filepath.Base(j.Stage) != j.Stage || strings.ContainsAny(j.Stage, "\\\x00") {
 		return errors.New("unsupported deployment journal")
 	}
 	for _, value := range []string{j.OperationID, j.DestinationID, j.CertificateID, j.GenerationID, j.GenerationSource, j.GenerationReference, j.Fingerprint, j.Kind, j.Resource, j.Configuration, j.Target} {
@@ -168,9 +180,33 @@ func structure(j *Journal) error {
 		if len(group.Files) == 0 || group.Name == "" {
 			return errors.New("empty deployment group")
 		}
+		if j.Version == 1 && group.Published || j.Version == 2 && group.Done && !group.Published {
+			return errors.New("invalid deployment publication progress")
+		}
+		if j.Version == 1 && group.Activation != "" || group.Reload == "" && group.Activation != "" {
+			return errors.New("unexpected activation result")
+		}
+		if j.Version == 2 && group.Reload != "" {
+			switch group.Activation {
+			case "pending":
+				if group.Done {
+					return errors.New("pending activation marked completed")
+				}
+			case "callback-succeeded":
+				if !group.Done {
+					return errors.New("activation result lacks completion checkpoint")
+				}
+			case "callback-failed", "unavailable":
+				if group.Done || !group.Published {
+					return errors.New("invalid failed activation result")
+				}
+			default:
+				return errors.New("invalid activation result")
+			}
+		}
 		if !group.Done {
 			pending = true
-		} else if pending {
+		} else if pending && j.Version == 1 {
 			return errors.New("invalid deployment progress")
 		}
 		for _, index := range group.Files {
@@ -231,7 +267,7 @@ func (s *Store) Prepare(j Journal, batches []Batch, guards []string, allowExisti
 	if err != nil {
 		return err
 	}
-	j.Version, j.Stage = 1, filepath.Base(stage)
+	j.Version, j.Stage = 2, filepath.Base(stage)
 	dirs := map[string]bool{}
 	addDir := func(path string) error {
 		if dirs[path] {
@@ -250,6 +286,9 @@ func (s *Store) Prepare(j Journal, batches []Batch, guards []string, allowExisti
 	}
 	for _, batch := range batches {
 		group := Group{Name: batch.Name, Reload: batch.Reload}
+		if group.Reload != "" {
+			group.Activation = "pending"
+		}
 		for _, content := range batch.Files {
 			if err := addDir(filepath.Dir(content.Path)); err != nil {
 				return err
@@ -336,6 +375,25 @@ func checkGuards(j *Journal) error {
 	return nil
 }
 
+func checkPublishedFiles(j *Journal) error {
+	for _, group := range j.Groups {
+		if !group.Published && !group.Done {
+			continue
+		}
+		for _, index := range group.Files {
+			file := j.Files[index]
+			now, err := Inspect(file.Path)
+			if err != nil {
+				return err
+			}
+			if now != file.After {
+				return fmt.Errorf("published deployment file changed: %s", file.Path)
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Store) syncJournal() error {
 	if err := SyncFile(filepath.Join(s.Dir, "current.json")); err != nil {
 		return err
@@ -404,7 +462,7 @@ func (s *Store) Replay() error {
 	}
 	completed := map[int]bool{}
 	for _, group := range j.Groups {
-		if group.Done {
+		if group.Done || group.Published {
 			for _, i := range group.Files {
 				completed[i] = true
 			}
@@ -432,9 +490,28 @@ func (s *Store) Replay() error {
 			}
 		}
 	}
+	if j.Version == 1 {
+		// Upgrade sequential journals before checkpointing independent results.
+		// Preserve completed groups without inferring success for pending ones.
+		j.Version = 2
+		for i := range j.Groups {
+			j.Groups[i].Published = j.Groups[i].Done
+			if j.Groups[i].Reload != "" {
+				j.Groups[i].Activation = "pending"
+				if j.Groups[i].Done {
+					j.Groups[i].Activation = "callback-succeeded"
+				}
+			}
+		}
+		if err := s.checkpoint(j); err != nil {
+			return err
+		}
+	}
+	// Publish every group before invoking any service hook. An activation
+	// failure must not prevent independent services from receiving their files.
 	for groupIndex := range j.Groups {
 		group := &j.Groups[groupIndex]
-		if group.Done {
+		if group.Done || group.Published {
 			continue
 		}
 		if err := checkDirectories(j); err != nil {
@@ -488,6 +565,20 @@ func (s *Store) Replay() error {
 				return err
 			}
 		}
+		group.Published = true
+		if err := s.checkpoint(j); err != nil {
+			return err
+		}
+		if err := s.Boundary("published-" + group.Name); err != nil {
+			return err
+		}
+	}
+	var activationErrors error
+	for groupIndex := range j.Groups {
+		group := &j.Groups[groupIndex]
+		if group.Done {
+			continue
+		}
 		if group.Reload != "" {
 			if err := checkDirectories(j); err != nil {
 				return err
@@ -495,15 +586,31 @@ func (s *Store) Replay() error {
 			if err := checkGuards(j); err != nil {
 				return err
 			}
+			if err := checkPublishedFiles(j); err != nil {
+				return err
+			}
 			if s.Reload == nil {
 				return errors.New("deployment activation unavailable")
 			}
 			if err := s.Reload(group.Reload); err != nil {
-				return fmt.Errorf("activate %s: %w", group.Reload, err)
+				var local *ActivationError
+				if !errors.As(err, &local) {
+					return errors.Join(activationErrors, fmt.Errorf("activate %s: %w", group.Reload, err))
+				}
+				activationErrors = errors.Join(activationErrors, fmt.Errorf("activate %s: %w", group.Reload, err))
+				group.Activation = "callback-failed"
+				if !local.Attempted {
+					group.Activation = "unavailable"
+				}
+				if err := s.checkpoint(j); err != nil {
+					return errors.Join(activationErrors, err)
+				}
+				continue
 			}
 			if err := s.Boundary("reload-" + group.Reload); err != nil {
 				return err
 			}
+			group.Activation = "callback-succeeded"
 		}
 		group.Done = true
 		if err := s.checkpoint(j); err != nil {
@@ -512,6 +619,9 @@ func (s *Store) Replay() error {
 		if err := s.Boundary("group-" + group.Name); err != nil {
 			return err
 		}
+	}
+	if activationErrors != nil {
+		return errors.Join(activationErrors, checkDirectories(j), checkGuards(j), checkPublishedFiles(j))
 	}
 	// Final observation is required before declaring success.
 	return s.CheckCompleted(j)
