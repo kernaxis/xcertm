@@ -45,6 +45,10 @@ there is no interface per package. The ACME protocol is not reimplemented.
 Only DSM uses optional target initialization to register a dedicated entry under
 the shared locks before read-only planning; its ID and index recovery remain
 inside the adapter. File publication/replay stays in the common coordinator.
+DSM activation prefers package-declared TLS reloaders and retains a legacy
+callback fallback when no TLS profile is declared. Publication and per-service
+callback outcomes are distinct; an activation error does not prevent independent
+services from completing. Recorded callback success is not live health checking.
 `x/crypto/acme` supplies RFC 8555, JWS, nonces, orders and certificate retrieval;
 XCertM adds lifecycle persistence, policy and recovery. Its BSD license is
 compatible with MIT distribution, with the required notice retained.

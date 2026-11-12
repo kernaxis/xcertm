@@ -28,6 +28,7 @@ type Config struct {
 type service struct {
 	Subscriber string `json:"subscriber"`
 	Service    string `json:"service"`
+	IsPackage  bool   `json:"isPkg"`
 }
 type certInfo struct {
 	Services []service `json:"services"`
@@ -58,7 +59,7 @@ func Open(stateRoot string, config Config) (*deploy.Session, error) {
 		return nil, err
 	}
 	t := &target{config: config, archive: filepath.Join(root, "usr/syno/etc/certificate/_archive"), stateDir: deploy.StateDirectory(stateRoot, config.DestinationID)}
-	if err := t.checkForeign(); err != nil {
+	if err := t.checkCreationOwner(); err != nil {
 		return nil, err
 	}
 	session, err := deploy.Open(stateRoot, t)
@@ -85,18 +86,7 @@ func (t *target) Binding() deploy.Binding {
 	} else if t.automatic() {
 		selector = "auto"
 	}
-	return deploy.Binding{DestinationID: t.config.DestinationID, Kind: "dsm", Resource: t.archive, Configuration: state.Digest([]byte(selector)), LockName: ".synolego.lock"}
-}
-
-func (t *target) checkForeign() error {
-	info, err := state.Inspect(filepath.Join(t.archive, ".synolego-pending"))
-	if err != nil {
-		return err
-	}
-	if info.Exists {
-		return errors.New("Synolego has a pending DSM deployment; recover it with Synolego first")
-	}
-	return t.checkCreationOwner()
+	return deploy.Binding{DestinationID: t.config.DestinationID, Kind: "dsm", Resource: t.archive, Configuration: state.Digest([]byte(selector)), LockName: ".xcertm.lock"}
 }
 
 func (t *target) readInfo() (map[string]certInfo, error) {
@@ -156,7 +146,7 @@ func (t *target) servicePath(s service) (string, error) {
 }
 
 func (t *target) Plan(g domain.Generation) (deploy.Plan, error) {
-	if err := t.checkForeign(); err != nil {
+	if err := t.checkCreationOwner(); err != nil {
 		return deploy.Plan{}, err
 	}
 	id, err := t.selectedID(g.CertificateID())
@@ -206,7 +196,7 @@ func (t *target) Plan(g domain.Generation) (deploy.Plan, error) {
 }
 
 func (t *target) Validate(j *state.Journal) error {
-	if err := t.checkForeign(); err != nil {
+	if err := t.checkCreationOwner(); err != nil {
 		return err
 	}
 	if !safeComponent(j.Target) {

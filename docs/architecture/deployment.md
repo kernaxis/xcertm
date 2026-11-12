@@ -122,25 +122,65 @@ Service certificate directories are resolved in this order:
 1. `usr/local/etc/certificate/<subscriber>/<service>`
 2. `usr/syno/etc/certificate/<subscriber>/<service>`
 
-Activation follows Synolego's local mechanics: the first available subscriber
-script is searched in `usr/libexec/certificate.d`,
-`usr/local/libexec/certificate.d`, `usr/syno/share/certificate.d`, and
-`usr/local/share/certificate.d`, and called with the service argument. If present,
-`usr/libexec/security-profile/tls-profile/<subscriber>.sh` is then called without
-arguments; `system/default` uses `dsm.sh`. Programs are invoked directly without
-shell interpolation, with a 30-second context timeout per service. Script output
-is discarded. Missing activation scripts are an error for an assigned service.
-With no assigned services, only the archive is published.
+All certificate files are published before activation begins. Publication and
+callback results are checkpointed separately for each assigned service.
 
-A service is checkpointed only after its files and activation succeed. Completed
-services are not activated again during recovery. An interruption after successful
-activation but before its checkpoint can repeat that activation; scripts must
-tolerate repetition. Arbitrary user hooks are not supported.
+For package services (`isPkg` in DSM `INFO`), XCertM first reads
+`/var/packages/<subscriber>/conf/resource`. If the certificate service is
+registered in `certificate-config` and `tls-profile` declares a matching TLS
+service, its `reloader-relpath` is called without arguments. A sole TLS profile
+can also be selected when the certificate and TLS service names differ. Multiple
+profiles without a unique exact match are reported as ambiguous, not guessed.
+The `owner` field denotes certificate file ownership; it is not used as a
+package or systemd unit name.
 
-DSM shares `.synolego.lock` with the referenced Synolego implementation and
-refuses `.synolego-pending`: recover those operations with Synolego. XCertM state
-is not a migration of Synolego's journals. Changing assignments and remote DSM
-APIs are outside this implementation.
+The reloader must resolve to a regular executable inside the package's resolved
+`target` directory. DSM's package-target symlinks are supported, but path
+traversal and executable symlinks escaping that target are rejected. A declared
+TLS reloader replaces the historical hooks; it is not followed by them. This
+avoids calling a package-starting certificate hook before a native TLS reloader
+that already handles an inactive service with `try-restart`.
+
+If there is no package resource file or no TLS profile declaration, the legacy
+activation path remains available: search `usr/libexec/certificate.d`,
+`usr/local/libexec/certificate.d`, `usr/syno/share/certificate.d`, then
+`usr/local/share/certificate.d`, and call the first subscriber script with the
+service argument. If present, additionally call
+`usr/libexec/security-profile/tls-profile/<subscriber>.sh` without arguments;
+`system/default` uses `dsm.sh`. Malformed, ambiguous or unavailable declared TLS
+reloaders produce an error without falling back to the legacy hooks.
+
+Programs are invoked directly without shell interpolation, with a 30-second
+context timeout per service. Raw script output is discarded because it can
+contain sensitive data. Script path, service identity and execution errors are
+reported. Arbitrary user hooks are not supported.
+
+An execution error or unavailable callback leaves that service pending and does
+not block callbacks for the other services. The command still exits nonzero.
+Certificate conflicts, changed assignments, damaged state and cancellation stop
+processing. Published files are checked before each callback so a hook cannot
+silently change certificate material subsequently used by another service.
+
+`deploy`, `show` and their JSON output distinguish `files_published` from
+`activation`: `pending`, `callback-succeeded`, `callback-failed`, or `unavailable`.
+A successful callback is not proof that a process is active or serves this
+certificate. XCertM delegates reload behavior to DSM; legacy scripts can still
+start services according to the vendor's implementation. It does not infer unit
+names, repair packages, reset failed units or classify a package as unused.
+
+Recovery retries only pending/failed callbacks and preserves successes, including
+successes recorded after an earlier service failed. It uses the same generation
+without another ACME request. A callback can repeat if interrupted after success
+but before its checkpoint. With no assigned services, only the archive is
+published.
+
+DSM uses `.xcertm.lock` in the certificate archive to serialize XCertM
+deployments across destinations and stores. It coordinates only XCertM;
+DSM and other certificate tools do not participate in this advisory lock.
+Avoid concurrent certificate changes by those tools. Changing assignments
+and remote DSM APIs are outside this implementation.
+Use only one XCertM binary version at a time during an upgrade of the locking
+protocol; retain the persistent store to resume any pending deployment.
 
 ## Persistence and recovery
 
@@ -152,6 +192,14 @@ destination ID maps to its own `deployments/<SHA-256-of-ID>` directory, with:
 - `current.json`: the pending operation or latest completed receipt (`0600`).
 - `operation-*`: staged immutable contents (`0700`, files `0600`).
 - `.lock`: a retained destination lock file.
+
+New deployment journals use version 2 to record publication and independent
+activation results. Version 1 completed receipts remain readable without
+replaying callbacks. Pending version 1 journals are validated and upgraded under
+the existing locks, preserving recorded successes and the original generation.
+No initial/live service state is reconstructed from an old failure. Keep using
+the new binary once a version 2 journal is written; older binaries cannot read
+that format. No stage or key is removed by this migration.
 
 The receipt also retains the generation's explicit source/reference and its
 original validation instant, independently of ACME. Reusing a recorded generation

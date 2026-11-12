@@ -209,7 +209,7 @@ func TestDSMConfigurationAndContentConflicts(t *testing.T) {
 	}
 }
 
-func TestDSMCertificateIDForeignMarkerAndSharedLock(t *testing.T) {
+func TestDSMCertificateIDAndArchiveLock(t *testing.T) {
 	l := newDSM(t)
 	config := l.config
 	config.UseDefault = false
@@ -218,17 +218,21 @@ func TestDSMCertificateIDForeignMarkerAndSharedLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	lock, err := os.Stat(filepath.Join(l.archive, ".xcertm.lock"))
+	if err != nil || !lock.Mode().IsRegular() || lock.Mode().Perm() != 0600 {
+		t.Fatalf("missing or unsafe XCertM archive lock: %v", err)
+	}
 	if second, err := dsm.Open(privateTempDir(t), l.config); err == nil {
 		second.Close()
 		t.Fatal("shared archive lock bypassed")
 	}
 	deployOK(t, s, "op", generation(t, "g1", false))
 	s.Close()
-	write(t, filepath.Join(l.archive, ".synolego-pending"), []byte("foreign-store"), 0600)
-	if second, err := dsm.Open(l.state, config); err == nil {
-		second.Close()
-		t.Fatal("pending Synolego deployment ignored")
+	reopened, err := dsm.Open(l.state, config)
+	if err != nil {
+		t.Fatal("archive lock was not released", err)
 	}
+	defer reopened.Close()
 }
 
 func TestDSMDefaultTLSProfileAndMissingReloadScript(t *testing.T) {

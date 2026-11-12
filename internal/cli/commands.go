@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,8 +15,18 @@ import (
 
 	"github.com/kernaxis/xcertm/internal/app"
 	"github.com/kernaxis/xcertm/internal/config"
+	"github.com/kernaxis/xcertm/internal/deploy"
 	urfave "github.com/urfave/cli/v3"
 )
+
+func printServiceResults(out io.Writer, services []deploy.ServiceResult) error {
+	for _, service := range services {
+		if _, err := fmt.Fprintf(out, "    %s: files_published=%t, activation=%s\n", service.Name, service.FilesPublished, service.Activation); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func rootFlags() []urfave.Flag {
 	return []urfave.Flag{
@@ -320,6 +331,16 @@ func runLifecycle(ctx context.Context, c *urfave.Command, action string) error {
 			status := outcome.State
 			if err != nil {
 				status = "failed"
+				for _, destination := range outcome.Deployments {
+					if destination.Completed {
+						status = "partial"
+					}
+					for _, service := range destination.Services {
+						if service.FilesPublished {
+							status = "partial"
+						}
+					}
+				}
 			}
 			generation := ""
 			if outcome.GenerationID != "" {
@@ -330,6 +351,9 @@ func runLifecycle(ctx context.Context, c *urfave.Command, action string) error {
 			}
 			for _, d := range outcome.Deployments {
 				if _, err := fmt.Fprintf(c.Root().Writer, "  %s: generation %s, completed=%t\n", d.DestinationID, d.GenerationID, d.Completed); err != nil {
+					return err
+				}
+				if err := printServiceResults(c.Root().Writer, d.Services); err != nil {
 					return err
 				}
 			}
@@ -380,6 +404,12 @@ func inspectList(_ context.Context, c *urfave.Command) error {
 			state := "pending"
 			if d.Completed {
 				state = "completed"
+			} else {
+				for _, service := range d.Services {
+					if service.FilesPublished {
+						state = "partial"
+					}
+				}
 			}
 			status = append(status, d.ID+":"+state+"@"+d.GenerationID)
 		}
@@ -409,6 +439,9 @@ func inspectShow(_ context.Context, c *urfave.Command) error {
 		}
 		for _, d := range row.Deployments {
 			if _, err := fmt.Fprintf(c.Root().Writer, "  Destination: %s (%s), generation: %s, completed: %t\n", d.ID, d.Type, d.GenerationID, d.Completed); err != nil {
+				return err
+			}
+			if err := printServiceResults(c.Root().Writer, d.Services); err != nil {
 				return err
 			}
 		}

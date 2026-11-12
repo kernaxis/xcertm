@@ -27,9 +27,9 @@ type creationOwner struct {
 	Fingerprint   string `json:"fingerprint"`
 }
 
-// Entry registration precedes certificate publication, as in Synolego. The
-// durable mapping and before/after INFO images reconcile a lost write response
-// without allocating a second visible entry or overwriting an unrelated edit.
+// Entry registration precedes certificate publication. The durable mapping and
+// before/after INFO images reconcile a lost write response without allocating a
+// second visible entry or overwriting an unrelated edit.
 type managedEntry struct {
 	Version       int             `json:"version"`
 	ID            string          `json:"id"`
@@ -86,7 +86,7 @@ func (t *target) checkCreationOwner() error {
 }
 
 func (t *target) claimCreation(owner creationOwner) error {
-	if err := t.checkForeign(); err != nil {
+	if err := t.checkCreationOwner(); err != nil {
 		return err
 	}
 	existing, err := t.creation()
@@ -419,7 +419,7 @@ func (t *target) Initialize(ctx context.Context, operationID string, generation 
 	if err := t.checkEntryDirectories(entry); err != nil {
 		return err
 	}
-	if err := t.checkForeign(); err != nil {
+	if err := t.checkCreationOwner(); err != nil {
 		return err
 	}
 	path := filepath.Join(t.archive, "INFO")

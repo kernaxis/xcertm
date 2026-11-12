@@ -108,8 +108,7 @@ Each archive contains the binary, README, guides, example configuration, MIT
 license, the self-contained `THIRD_PARTY_NOTICES.md` with complete license/NOTICE
 texts, and a generated `THIRD_PARTY_LICENSES.txt` runtime inventory. No separate
 directory of vendored license files is needed. Only dependencies compiled into XCertM are inventoried;
-CI tools and their dependencies are not linked into the application. There is
-no Lego dependency or unrelated source-license bundle.
+CI tools and their dependencies are not linked into the application.
 
 To build an archive locally, install the packaging tool and run:
 

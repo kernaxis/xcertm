@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/kernaxis/xcertm/internal/deploy"
 	"github.com/kernaxis/xcertm/internal/domain"
 	"github.com/kernaxis/xcertm/internal/store"
 )
@@ -30,10 +31,11 @@ type CertificateInfo struct {
 	IssuancePending    bool              `json:"issuance_pending"`
 }
 type DeploymentInfo struct {
-	ID           string `json:"id"`
-	Type         string `json:"type"`
-	GenerationID string `json:"generation_id"`
-	Completed    bool   `json:"completed"`
+	ID           string                 `json:"id"`
+	Type         string                 `json:"type"`
+	GenerationID string                 `json:"generation_id"`
+	Completed    bool                   `json:"completed"`
+	Services     []deploy.ServiceResult `json:"services,omitempty"`
 }
 
 func (a *Service) Show(id, environment string) ([]CertificateInfo, error) {
@@ -70,7 +72,17 @@ func (a *Service) Show(id, environment string) ([]CertificateInfo, error) {
 		info := CertificateInfo{ID: id, GenerationID: r.Input.ID, Environment: r.Request.ACME.Environment, Domains: leaf.DNSNames, NotBefore: leaf.NotBefore, NotAfter: leaf.NotAfter, ValidatedAt: r.Input.ValidatedAt, Issuer: leaf.Issuer.String(), PublicKeyAlgorithm: leaf.PublicKeyAlgorithm.String(), Fingerprint: hex.EncodeToString(hash[:]), Provenance: r.Input.Provenance, IssuancePending: pending != nil && pending.Request.ACME.Environment == r.Request.ACME.Environment}
 		for _, d := range deployments {
 			if d.Environment == info.Environment {
-				info.Deployments = append(info.Deployments, DeploymentInfo{d.ID, d.Destination.Type, d.GenerationID, d.Completed})
+				item := DeploymentInfo{ID: d.ID, Type: d.Destination.Type, GenerationID: d.GenerationID, Completed: d.Completed}
+				if d.Destination.Type == "dsm" {
+					receipt, err := deploy.Inspect(a.Root, d.ID)
+					if err != nil {
+						return nil, err
+					}
+					if receipt.OperationID == d.OperationID && receipt.CertificateID == id && receipt.GenerationID == d.GenerationID {
+						item.Services = receipt.Services
+					}
+				}
+				info.Deployments = append(info.Deployments, item)
 			}
 		}
 		infos = append(infos, info)
