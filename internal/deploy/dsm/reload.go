@@ -55,17 +55,20 @@ func (t *target) Activate(ctx context.Context, key string) error {
 		}
 		return nil
 	}
-	path, declared, err := t.packageTLSReloader(s)
+	path, kind, err := t.packageReloader(s)
 	if err != nil {
 		return &state.ActivationError{Err: err}
 	}
-	if declared {
+	if kind == "tls" || kind == "certificate" {
 		if t.config.Progress != nil {
-			t.config.Progress(fmt.Sprintf("Using declared DSM TLS reloader for %s: %s", key, path))
+			t.config.Progress(fmt.Sprintf("Using declared DSM %s reloader for %s: %s", kind, key, path))
 		}
 		// The TLS profile replaces the historical certificate hook. Calling
 		// both can start an unused package before its safe try-restart handler.
-		return run(path)
+		if kind == "tls" {
+			return run(path)
+		}
+		return run(path, s.Service)
 	}
 	if t.config.Progress != nil {
 		t.config.Progress(fmt.Sprintf("Using legacy DSM activation callbacks for %s", key))
@@ -75,7 +78,7 @@ func (t *target) Activate(ctx context.Context, key string) error {
 		path := filepath.Join(t.config.Root, base, s.Subscriber)
 		ok, err := executable(path)
 		if err != nil {
-			return err
+			return &state.ActivationError{Err: err}
 		}
 		if ok {
 			if err := run(path, s.Service); err != nil {
@@ -92,7 +95,7 @@ func (t *target) Activate(ctx context.Context, key string) error {
 	path = filepath.Join(t.config.Root, "usr/libexec/security-profile/tls-profile", name)
 	ok, err := executable(path)
 	if err != nil {
-		return err
+		return &state.ActivationError{Err: err}
 	}
 	if ok {
 		if err := run(path); err != nil {
@@ -101,6 +104,12 @@ func (t *target) Activate(ctx context.Context, key string) error {
 		found = true
 	}
 	if !found {
+		if kind == "none" {
+			if t.config.Progress != nil {
+				t.config.Progress(fmt.Sprintf("No callback declared or available for %s; files published without service activation", key))
+			}
+			return state.ErrNoActivation
+		}
 		return &state.ActivationError{Err: fmt.Errorf("no DSM reload script found for %s", key)}
 	}
 	return nil

@@ -134,7 +134,7 @@ func TestInlineTokenIssuanceAndCleanupRecoveryNeverPersistSecret(t *testing.T) {
 	if !json.Valid([]byte(out.String())) {
 		t.Fatal("progress contaminated JSON stdout")
 	}
-	if !strings.Contains(stderr.String(), "[web]") || !strings.Contains(stderr.String(), "Deploying generation") {
+	if !strings.Contains(stderr.String(), "[web]") || !strings.Contains(stderr.String(), "already up to date; deployment skipped") {
 		t.Fatal("lifecycle progress is missing from stderr")
 	}
 }
@@ -801,14 +801,14 @@ func TestIssueToDSMAndFilesystemWithFailedReloadRecovery(t *testing.T) {
 	// Current configuration cannot redirect work already recorded for the NAS.
 	r.Destinations["nas-main"] = config.Destination{Type: "dsm", CertificateID: "OTHER"}
 	a = app.New(root, options)
-	out, err = a.Issue(context.Background(), r, app.RunOptions{Deploy: true, Force: true})
+	out, err = a.Issue(context.Background(), r, app.RunOptions{Deploy: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if out.State != "recovered" || l.finalizations != 1 {
 		t.Fatal("recovery caused another issuance")
 	}
-	if len(out.Deployments) != 1 || len(out.Deployments[0].Services) != 1 || out.Deployments[0].Services[0].Activation != "callback-succeeded" {
+	if len(out.Deployments) != 2 || len(out.Deployments[0].Services) != 1 || out.Deployments[0].Services[0].Activation != "callback-succeeded" || !out.Deployments[1].Unchanged {
 		t.Fatal("recovered callback outcome not reported", out.Deployments)
 	}
 	for _, dir := range []string{filepath.Join(archive, "ABC123"), service} {
@@ -902,7 +902,7 @@ func TestIssueToAutomaticDSMEntryAndRecoverWithoutReissuing(t *testing.T) {
 	id := entryID()
 	options.After = nil
 	a = app.New(root, options)
-	second, err := a.Issue(context.Background(), r, app.RunOptions{Deploy: true, Force: true})
+	second, err := a.Issue(context.Background(), r, app.RunOptions{Deploy: true})
 	if err != nil {
 		t.Fatal(err)
 	}

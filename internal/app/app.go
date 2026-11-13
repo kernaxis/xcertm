@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -34,6 +35,7 @@ type Options struct {
 	Progress           func(string)
 	After              func(string) error
 	DSMRoot            string
+	ForceDeploy        bool
 }
 type Service struct {
 	Root    string
@@ -137,6 +139,7 @@ func (p configuredProvider) Refresh(ctx context.Context, zone string) error {
 }
 
 func (a *Service) Issue(ctx context.Context, r config.Request, options RunOptions) (Outcome, error) {
+	r.Destinations = maps.Clone(r.Destinations)
 	out := Outcome{CertificateID: r.ID, Environment: r.ACME.Environment}
 	if err := r.Validate(true); err != nil {
 		return out, err
@@ -155,6 +158,8 @@ func (a *Service) Issue(ctx context.Context, r config.Request, options RunOption
 		return out, err
 	}
 	recovered := false
+	attempted := map[string]string{}
+	var recoveryErr error
 	for _, d := range requests {
 		if d.Completed || d.Environment != r.ACME.Environment {
 			continue
@@ -162,17 +167,17 @@ func (a *Service) Issue(ctx context.Context, r config.Request, options RunOption
 		if !options.Deploy || !slices.Contains(r.Certificate.Destinations, d.ID) {
 			return out, fmt.Errorf("destination %q has unfinished work; resume it with deploy before another issuance", d.ID)
 		}
-		result, err := a.publish(ctx, s, d)
+		out.GenerationID = d.GenerationID
+		r.Destinations[d.ID] = d.Destination
+		attempted[d.ID] = d.GenerationID
+		result, err := a.publish(ctx, s, d, false)
 		out.Deployments = append(out.Deployments, result)
 		if err != nil {
-			return out, err
+			recoveryErr = errors.Join(recoveryErr, fmt.Errorf("destination %q: %w", d.ID, err))
+			continue
 		}
 		recovered = true
 		out.GenerationID = d.GenerationID
-	}
-	if recovered {
-		out.State = "recovered"
-		return out, nil
 	}
 	pending, err := s.Pending(r.ID)
 	if err != nil {
@@ -183,6 +188,17 @@ func (a *Service) Issue(ctx context.Context, r config.Request, options RunOption
 	if loadErr != nil && !os.IsNotExist(loadErr) {
 		return out, loadErr
 	}
+	if recoveryErr != nil {
+		// Keep the pending generation recoverable. Independent destinations may
+		// still receive the latest stored material, without another issuance.
+		if loadErr == nil && options.Deploy {
+			out.GenerationID = g.ID()
+			results, err := a.deploySelected(ctx, s, r, g, attempted)
+			out.Deployments = mergeDeployments(out.Deployments, results)
+			recoveryErr = errors.Join(recoveryErr, err)
+		}
+		return out, recoveryErr
+	}
 	if loadErr == nil {
 		leaf, err := x509.ParseCertificate(g.CertificateDER())
 		if err != nil {
@@ -191,7 +207,8 @@ func (a *Service) Issue(ctx context.Context, r config.Request, options RunOption
 		if err := g.ValidateDNSNames(r.Certificate.Domains); err != nil {
 			need = true
 		}
-		if a.options.Now().Before(leaf.NotBefore) || !a.options.Now().Before(leaf.NotAfter) {
+		now := a.options.Now()
+		if now.Before(leaf.NotBefore) || !now.Before(leaf.NotAfter) {
 			need = true
 		}
 		if options.Renew {
@@ -205,16 +222,45 @@ func (a *Service) Issue(ctx context.Context, r config.Request, options RunOption
 					return out, errors.New("renew_before must be smaller than certificate lifetime")
 				}
 			}
-			if !a.options.Now().Before(leaf.NotAfter.Add(-window)) {
+			if !now.Before(leaf.NotAfter.Add(-window)) {
 				need = true
 			}
+			if a.options.Progress != nil {
+				decision := "renewal skipped"
+				if need {
+					decision = "renewal required"
+				}
+				if pending != nil {
+					decision = "pending issuance must be resumed"
+				}
+				reason := ""
+				switch {
+				case options.Force:
+					reason = "; forced by --force"
+				case now.Before(leaf.NotBefore):
+					reason = "; certificate is not yet valid"
+				case !now.Before(leaf.NotAfter):
+					reason = "; certificate has expired"
+				case g.ValidateDNSNames(r.Certificate.Domains) != nil:
+					reason = "; requested DNS names changed"
+				}
+				a.options.Progress(fmt.Sprintf("Certificate validity remaining: %s (renewal threshold: %s); %s%s", validityDuration(leaf.NotAfter.Sub(now)), validityDuration(window), decision, reason))
+			}
 		}
+	} else if options.Renew && a.options.Progress != nil {
+		a.options.Progress("No stored certificate generation; issuance required")
 	}
 	out.State = "reused"
 	if options.Renew {
 		out.State = "not-due"
 	}
+	if recovered {
+		out.State = "recovered"
+	}
 	if need || pending != nil {
+		if pending != nil && a.options.Progress != nil {
+			a.options.Progress("Resuming pending issuance operation")
+		}
 		i := issuer.Issuer{HTTPClient: a.options.HTTPClient, DirectoryURL: a.options.DirectoryURL, Now: a.options.Now, After: a.options.After, Progress: a.options.Progress}
 		solver := dns.Solver{Provider: configuredProvider{r.Provider, a.options.HTTPClient}, Resolver: a.options.Resolver, PollInterval: a.options.PollInterval, PropagationTimeout: a.options.PropagationTimeout, Progress: a.options.Progress}
 		g, err = i.Obtain(ctx, s, r, solver)
@@ -234,8 +280,8 @@ func (a *Service) Issue(ctx context.Context, r config.Request, options RunOption
 		if len(r.Certificate.Destinations) == 0 {
 			return out, errors.New("no deployment destination selected; certificate is stored")
 		}
-		results, err := a.deploySelected(ctx, s, r, g)
-		out.Deployments = append(out.Deployments, results...)
+		results, err := a.deploySelected(ctx, s, r, g, attempted)
+		out.Deployments = mergeDeployments(out.Deployments, results)
 		return out, err
 	}
 	return out, nil
@@ -265,11 +311,11 @@ func (a *Service) Deploy(ctx context.Context, r config.Request) (Outcome, error)
 		return out, errors.New("no deployment destination selected")
 	}
 	out.GenerationID = g.ID()
-	out.Deployments, err = a.deploySelected(ctx, s, r, g)
+	out.Deployments, err = a.deploySelected(ctx, s, r, g, nil)
 	return out, err
 }
 
-func (a *Service) deploySelected(ctx context.Context, s *store.Store, r config.Request, g domain.Generation) ([]deploy.Result, error) {
+func (a *Service) deploySelected(ctx context.Context, s *store.Store, r config.Request, g domain.Generation, attempted map[string]string) ([]deploy.Result, error) {
 	previous, err := s.Deployments("")
 	if err != nil {
 		return nil, err
@@ -281,7 +327,11 @@ func (a *Service) deploySelected(ctx context.Context, s *store.Store, r config.R
 	var results []deploy.Result
 	var combined error
 	for _, id := range r.Certificate.Destinations {
+		if attempted[id] == g.ID() {
+			continue
+		}
 		d := store.Deployment{ID: id, CertificateID: r.ID, GenerationID: g.ID(), Environment: r.ACME.Environment, OperationID: g.ID() + ":" + id, Destination: r.Destinations[id]}
+		force := a.options.ForceDeploy
 		if old, ok := byID[id]; ok {
 			if old.CertificateID != r.ID {
 				combined = errors.Join(combined, fmt.Errorf("destination %q belongs to another certificate", id))
@@ -292,8 +342,30 @@ func (a *Service) deploySelected(ctx context.Context, s *store.Store, r config.R
 					combined = errors.Join(combined, fmt.Errorf("destination %q has unfinished work in another ACME environment", id))
 					continue
 				}
-				d = old
+				pending := true
+				if force {
+					receipt, err := deploy.Inspect(a.Root, id)
+					if err != nil {
+						combined = errors.Join(combined, err)
+						continue
+					}
+					pending = receipt.OperationID != "" && !receipt.Completed
+				}
+				if pending {
+					d = old
+					force = false
+				}
+			} else if old.Environment == d.Environment && old.GenerationID == d.GenerationID {
+				d.OperationID = old.OperationID
 			}
+		}
+		if force {
+			operationID, err := store.NewID()
+			if err != nil {
+				combined = errors.Join(combined, err)
+				continue
+			}
+			d.OperationID = operationID
 		}
 		if d.Destination.Type == "filesystem" {
 			d.Destination.Directory, err = filepath.Abs(d.Destination.Directory)
@@ -302,7 +374,7 @@ func (a *Service) deploySelected(ctx context.Context, s *store.Store, r config.R
 				continue
 			}
 		}
-		result, err := a.publish(ctx, s, d)
+		result, err := a.publish(ctx, s, d, force)
 		results = append(results, result)
 		if err != nil {
 			combined = errors.Join(combined, fmt.Errorf("destination %q: %w", id, err))
@@ -311,9 +383,9 @@ func (a *Service) deploySelected(ctx context.Context, s *store.Store, r config.R
 	return results, combined
 }
 
-func (a *Service) publish(ctx context.Context, s *store.Store, d store.Deployment) (deploy.Result, error) {
+func (a *Service) publish(ctx context.Context, s *store.Store, d store.Deployment, force bool) (deploy.Result, error) {
 	if a.options.Progress != nil {
-		a.options.Progress(fmt.Sprintf("Deploying generation %q to destination %q", d.GenerationID, d.ID))
+		a.options.Progress(fmt.Sprintf("Checking deployment of generation %q to destination %q", d.GenerationID, d.ID))
 	}
 	expected := deploy.Result{OperationID: d.OperationID, DestinationID: d.ID, CertificateID: d.CertificateID, GenerationID: d.GenerationID}
 	g, _, err := s.Generation(d.CertificateID, d.GenerationID)
@@ -339,7 +411,15 @@ func (a *Service) publish(ctx context.Context, s *store.Store, d store.Deploymen
 	if a.options.After != nil {
 		session.After = func(point string) error { return a.options.After("deploy-" + point) }
 	}
-	result, err := session.Deploy(ctx, d.OperationID, g)
+	var result deploy.Result
+	if force {
+		if a.options.Progress != nil {
+			a.options.Progress(fmt.Sprintf("Forcing republication to destination %q", d.ID))
+		}
+		result, err = session.Republish(ctx, d.OperationID, g)
+	} else {
+		result, err = session.Deploy(ctx, d.OperationID, g)
+	}
 	if result.DestinationID == "" {
 		result = expected
 	}
@@ -351,7 +431,11 @@ func (a *Service) publish(ctx context.Context, s *store.Store, d store.Deploymen
 		return result, err
 	}
 	if a.options.Progress != nil {
-		a.options.Progress(fmt.Sprintf("Deployment to %q completed", d.ID))
+		if result.Unchanged {
+			a.options.Progress(fmt.Sprintf("Destination %q already up to date; deployment skipped", d.ID))
+		} else {
+			a.options.Progress(fmt.Sprintf("Deployment to %q completed", d.ID))
+		}
 	}
 	return result, nil
 }

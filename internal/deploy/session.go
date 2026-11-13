@@ -2,9 +2,7 @@ package deploy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +19,7 @@ type Binding struct {
 type Plan struct {
 	Target        string
 	Batches       []state.Batch
-	Guards        []string
+	Guards        []state.Guard
 	AllowExisting bool
 }
 
@@ -42,6 +40,7 @@ type Activator interface {
 // entry before read-only planning. It owns durable metadata recovery; Session
 // holds both locks and supplies the same fault boundaries as file deployment.
 type Initializer interface {
+	InitializationPaths(domain.Generation) ([]string, error)
 	Initialize(context.Context, string, domain.Generation, func(string) error) error
 }
 
@@ -54,6 +53,7 @@ type Result struct {
 	OperationID, DestinationID, CertificateID, GenerationID string
 	Completed                                               bool
 	Services                                                []ServiceResult `json:"services,omitempty"`
+	Unchanged                                               bool            `json:"unchanged,omitempty"`
 }
 
 // ServiceResult reports file publication and callback execution, not live
@@ -62,11 +62,6 @@ type ServiceResult struct {
 	Name           string `json:"name"`
 	FilesPublished bool   `json:"files_published"`
 	Activation     string `json:"activation"`
-}
-
-type owner struct {
-	Store       string `json:"store"`
-	OperationID string `json:"operation_id"`
 }
 
 // Session holds resource and destination locks until Close. Its methods must
@@ -113,6 +108,9 @@ func Open(stateRoot string, target Target) (*Session, error) {
 	}
 	s := &Session{target: target, binding: b, store: state.Store{Dir: dir}}
 	s.store.Validate = s.validate
+	if upgrader, ok := target.(interface{ Upgrade(*state.Journal) error }); ok {
+		s.store.Upgrade = upgrader.Upgrade
+	}
 	for _, path := range []string{filepath.Join(resource, b.LockName), filepath.Join(dir, ".lock")} {
 		lock, err := state.Lock(path)
 		if err != nil {
@@ -121,7 +119,7 @@ func Open(stateRoot string, target Target) (*Session, error) {
 		}
 		s.locks = append(s.locks, lock)
 	}
-	if _, err := s.readOwner(); err != nil {
+	if _, err := s.readOwners(); err != nil {
 		s.Close()
 		return nil, err
 	}
@@ -159,63 +157,6 @@ func (s *Session) validate(j *state.Journal) error {
 		return err
 	}
 	return s.target.Validate(j)
-}
-
-func (s *Session) ownerPath() string { return filepath.Join(s.binding.Resource, ".xcertm-pending") }
-
-func (s *Session) readOwner() (*owner, error) {
-	snapshot, err := state.Inspect(s.ownerPath())
-	if err != nil || !snapshot.Exists {
-		return nil, err
-	}
-	data, err := state.ReadPrivate(s.ownerPath())
-	if err != nil {
-		return nil, err
-	}
-	var record owner
-	if err := state.Decode(data, &record); err != nil {
-		return nil, fmt.Errorf("invalid resource owner marker: %w", err)
-	}
-	if record.Store != s.store.Dir {
-		return nil, fmt.Errorf("resource has an unfinished deployment owned by %s", record.Store)
-	}
-	if strings.TrimSpace(record.OperationID) == "" {
-		return nil, errors.New("resource owner marker lacks operation identity")
-	}
-	return &record, nil
-}
-
-func (s *Session) claim(operationID string) error {
-	record, err := s.readOwner()
-	if err != nil {
-		return err
-	}
-	if record != nil && record.OperationID != operationID {
-		return errors.New("resource marker belongs to another operation")
-	}
-	data, err := json.Marshal(owner{s.store.Dir, operationID})
-	if err != nil {
-		return err
-	}
-	return state.WritePrivate(s.ownerPath(), data)
-}
-
-func (s *Session) release(operationID string) error {
-	record, err := s.readOwner()
-	if err != nil {
-		return err
-	}
-	if record == nil {
-		// Also completes a prior marker unlink whose directory sync failed.
-		return state.SyncDir(s.binding.Resource)
-	}
-	if record.OperationID != operationID {
-		return errors.New("resource owner changed during deployment")
-	}
-	if err := os.Remove(s.ownerPath()); err != nil {
-		return err
-	}
-	return state.SyncDir(s.binding.Resource)
 }
 
 func result(j *state.Journal) Result {
@@ -265,12 +206,12 @@ func (s *Session) Recover(ctx context.Context) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	record, err := s.readOwner()
+	owners, err := s.readOwners()
 	if err != nil {
 		return result(j), err
 	}
 	if j == nil {
-		if record != nil {
+		if owners.forStore(s.store.Dir) != nil {
 			return Result{}, errors.New("resource marker exists without its journal; manual recovery required")
 		}
 		return Result{}, nil
@@ -278,11 +219,15 @@ func (s *Session) Recover(ctx context.Context) (Result, error) {
 	if err := s.checkBinding(j); err != nil {
 		return result(j), err
 	}
-	if record != nil && record.OperationID != j.OperationID {
+	record := owners.forStore(s.store.Dir)
+	if record != nil && (record.OperationID != j.OperationID || !samePaths(record.Paths, journalPaths(j))) {
 		return result(j), errors.New("resource marker and journal disagree; manual recovery required")
 	}
+	if err := owners.check(s.store.Dir, j.OperationID, journalPaths(j)); err != nil {
+		return result(j), err
+	}
 	if !j.Completed() {
-		if err := s.claim(j.OperationID); err != nil {
+		if err := s.claim(j.OperationID, journalPaths(j)); err != nil {
 			return result(j), err
 		}
 	}
@@ -328,6 +273,16 @@ func (s *Session) configure(ctx context.Context) {
 }
 
 func (s *Session) Deploy(ctx context.Context, operationID string, generation domain.Generation) (Result, error) {
+	return s.deploy(ctx, operationID, generation, false)
+}
+
+// Republish starts a new, journaled publication from validated stored material.
+// It permits overwriting drift, but never abandons a pending operation.
+func (s *Session) Republish(ctx context.Context, operationID string, generation domain.Generation) (Result, error) {
+	return s.deploy(ctx, operationID, generation, true)
+}
+
+func (s *Session) deploy(ctx context.Context, operationID string, generation domain.Generation, force bool) (Result, error) {
 	if s.closed {
 		return Result{}, errors.New("deployment session is closed")
 	}
@@ -353,7 +308,9 @@ func (s *Session) Deploy(ctx context.Context, operationID string, generation dom
 			if !sameGeneration(previous, generation, material.Fingerprint) {
 				return result(previous), errors.New("operation ID reused with different generation material")
 			}
-			return s.Recover(ctx)
+			r, err := s.Recover(ctx)
+			r.Unchanged = err == nil && previous.Completed()
+			return r, err
 		}
 		if !previous.Completed() {
 			return result(previous), errors.New("another operation is pending; recover it first")
@@ -364,16 +321,38 @@ func (s *Session) Deploy(ctx context.Context, operationID string, generation dom
 		if previous.GenerationID == generation.ID() && !sameGeneration(previous, generation, material.Fingerprint) {
 			return result(previous), errors.New("generation ID reused with different material")
 		}
-		if err := s.store.CheckCompleted(previous); err != nil {
-			return result(previous), err
+		if !force {
+			if err := s.store.CheckCompleted(previous); err != nil {
+				return result(previous), err
+			}
 		}
 	}
-	if record, err := s.readOwner(); err != nil {
+	owners, err := s.readOwners()
+	if err != nil {
 		return Result{}, err
-	} else if record != nil {
-		return Result{}, errors.New("resource has a pending marker; recover it first")
+	}
+	if record := owners.forStore(s.store.Dir); record != nil {
+		if previous == nil || !previous.Completed() || record.OperationID != previous.OperationID || !samePaths(record.Paths, journalPaths(previous)) {
+			return Result{}, errors.New("resource has a pending marker; recover it first")
+		}
+		// A completed checkpoint can survive a lost marker-release response.
+		// Reconcile that receipt before starting another (possibly forced) run.
+		if _, err := s.Recover(ctx); err != nil {
+			return result(previous), err
+		}
+		owners, err = s.readOwners()
+		if err != nil {
+			return Result{}, err
+		}
 	}
 	if initializer, ok := s.target.(Initializer); ok {
+		writes, err := initializer.InitializationPaths(generation)
+		if err != nil {
+			return Result{}, err
+		}
+		if err := s.checkInitialization(owners, writes); err != nil {
+			return Result{}, err
+		}
 		boundary := func(point string) error {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -391,7 +370,14 @@ func (s *Session) Deploy(ctx context.Context, operationID string, generation dom
 	if err != nil {
 		return Result{}, err
 	}
+	paths := []string{}
+	for _, batch := range plan.Batches {
+		for _, file := range batch.Files {
+			paths = append(paths, file.Path)
+		}
+	}
 	j := state.Journal{
+		ForcePublish:        force,
 		OperationID:         operationID,
 		DestinationID:       s.binding.DestinationID,
 		CertificateID:       generation.CertificateID(),
@@ -405,11 +391,11 @@ func (s *Session) Deploy(ctx context.Context, operationID string, generation dom
 		Configuration:       s.binding.Configuration,
 		Target:              plan.Target,
 	}
-	if err := s.claim(operationID); err != nil {
+	if err := s.claim(operationID, paths); err != nil {
 		return Result{}, err
 	}
 	s.configure(ctx)
-	if err := s.store.Prepare(j, plan.Batches, plan.Guards, plan.AllowExisting); err != nil {
+	if err := s.store.Prepare(j, plan.Batches, plan.Guards, plan.AllowExisting || force); err != nil {
 		// If publication did not occur, this ordinary error has not touched any
 		// target. Retain orphan stages, but release our preparation marker.
 		current, loadErr := s.store.Load()

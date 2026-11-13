@@ -68,6 +68,9 @@ compatible with MIT distribution, with the required notice retained.
 - One generation can reach several destinations with different results. No
   transaction spans destinations, and deployment failure never automatically
   triggers another issuance.
+- Renewal logs its validity/threshold decision. Verified up-to-date deployments
+  are skipped; `deploy --force` explicitly republishes stored material. Recovery
+  precedes renewal evaluation and never discards pending generation material.
 - Generation storage precedes cleanup and deployment. An interrupted operation
   is identified and reconciled; a failed HTTP response does not prove no effect.
 - Keys, generations, failed issuance records, and deployment stages are retained.

@@ -81,10 +81,14 @@ func TestDSMDeployAndRecoverFailedService(t *testing.T) {
 			t.Fatal("obsolete chain was not removed")
 		}
 	}
-	if other, err := dsm.Open(privateTempDir(t), l.config); err == nil {
-		other.Close()
-		t.Fatal("another state root bypassed pending DSM owner")
+	other, err := dsm.Open(privateTempDir(t), l.config)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if _, err := other.Deploy(context.Background(), "other-op", g); err == nil {
+		t.Fatal("another state root bypassed pending file ownership")
+	}
+	other.Close()
 	if err := os.Remove(filepath.Join(l.scriptDir, "fail-svc2")); err != nil {
 		t.Fatal(err)
 	}

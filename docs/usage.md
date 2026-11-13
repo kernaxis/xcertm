@@ -161,6 +161,27 @@ sudo xcertm show web
 certificates were deployed; `show` displays more details. Both test and trusted
 certificates can appear, labeled `staging` and `production` respectively.
 
+`renew` logs the remaining validity and the effective renewal threshold. The
+default threshold is the final third of the certificate's lifetime; set
+`renew_before` to override it. With `--deploy`, destinations already holding the
+same generation are verified and skipped, without rewriting files or running
+callbacks. New or outdated destinations receive the stored generation even
+when renewal is not due. Unfinished deployments are resumed first; after a
+successful recovery, renewal is evaluated in the same command.
+
+To explicitly republish the saved certificate and rerun its DSM callbacks:
+
+```sh
+sudo xcertm deploy --config ./xcertm.yaml --certificate web --force
+```
+
+`deploy --force` does not issue a certificate. It can overwrite changed output
+files and creates a fresh deployment operation. It retains path, permission and
+binding checks. An unfinished operation is recovered using its original journal
+instead of being discarded; run the forced command again after recovery if
+you still need a fresh publication. `renew --force`, in contrast, requests a new
+certificate generation.
+
 To check for renewal every day, schedule this command as root with **DSM Task
 Scheduler** or **cron**, replacing the paths with your actual locations:
 
@@ -193,6 +214,18 @@ sudo xcertm show web
 verify that the service is running or that clients see the new certificate.
 Native package TLS reloaders are preferred when DSM declares them; older
 packages and built-in services can use their legacy callbacks.
+
+For a registered package service with no declared or legacy callback,
+`activation=not-available` means its files were published without service
+activation. This is a recorded limitation, not a successful reload, and does
+not leave the deployment pending. A declared callback that is missing, unsafe
+or fails remains an error. In particular, a nonzero native exit code is not
+ignored just because a package might be unused.
+
+An unfinished DSM destination reserves its certificate files, not the entire
+archive. Other entries can deploy while it awaits activation, provided they do
+not share those files. Entries sharing an assigned service remain protected
+against overlapping writes.
 
 After resolving an activation error, repeat the deployment with the same
 configuration:

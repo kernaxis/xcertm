@@ -10,6 +10,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -108,6 +109,24 @@ func journal(t *testing.T, root, id string) *state.Journal {
 		t.Fatal("expected durable journal")
 	}
 	return j
+}
+
+func writeLegacyJournal(t *testing.T, l dsmLayout, j *state.Journal, version int) {
+	t.Helper()
+	j.Version = version
+	for i := range j.Guards {
+		j.Guards[i].JSONKey = ""
+		snapshot, err := state.Inspect(j.Guards[i].Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		j.Guards[i].Before = snapshot
+	}
+	data, err := json.Marshal(j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(journalDir(l.state, l.config.DestinationID), "current.json"), data, 0600)
 }
 
 func checkPublished(t *testing.T, dir string, g domain.Generation, fullchain bool) {

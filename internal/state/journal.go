@@ -18,8 +18,9 @@ type File struct {
 	After  Snapshot `json:"after"`
 }
 type Guard struct {
-	Path   string   `json:"path"`
-	Before Snapshot `json:"before"`
+	Path    string   `json:"path"`
+	Before  Snapshot `json:"before"`
+	JSONKey string   `json:"json_key,omitempty"`
 }
 type Group struct {
 	Name       string `json:"name"`
@@ -40,10 +41,14 @@ type ActivationError struct {
 func (e *ActivationError) Error() string { return e.Err.Error() }
 func (e *ActivationError) Unwrap() error { return e.Err }
 
+// ErrNoActivation records publication without claiming a callback was run.
+var ErrNoActivation = errors.New("no activation callback declared or available")
+
 // Journal is private operational state, not a user configuration format.
 // A completed journal remains the receipt for the latest observed deployment.
 type Journal struct {
 	Version             int         `json:"version"`
+	ForcePublish        bool        `json:"force_publish,omitempty"`
 	Stage               string      `json:"stage"`
 	OperationID         string      `json:"operation_id"`
 	DestinationID       string      `json:"destination_id"`
@@ -80,6 +85,8 @@ type Store struct {
 	Reload   func(string) error
 	// After injects interruptions at durable boundaries; production leaves it nil.
 	After func(string) error
+	// Upgrade narrows adapter-specific guards after legacy preflight succeeds.
+	Upgrade func(*Journal) error
 }
 
 const maxJournalSize = 8 << 20
@@ -136,8 +143,11 @@ func (s *Store) Load() (*Journal, error) {
 }
 
 func structure(j *Journal) error {
-	if (j.Version != 1 && j.Version != 2) || !strings.HasPrefix(j.Stage, "operation-") || filepath.Base(j.Stage) != j.Stage || strings.ContainsAny(j.Stage, "\\\x00") {
+	if (j.Version < 1 || j.Version > 3) || !strings.HasPrefix(j.Stage, "operation-") || filepath.Base(j.Stage) != j.Stage || strings.ContainsAny(j.Stage, "\\\x00") {
 		return errors.New("unsupported deployment journal")
+	}
+	if j.Version < 3 && j.ForcePublish {
+		return errors.New("forced publication in legacy journal")
 	}
 	for _, value := range []string{j.OperationID, j.DestinationID, j.CertificateID, j.GenerationID, j.GenerationSource, j.GenerationReference, j.Fingerprint, j.Kind, j.Resource, j.Configuration, j.Target} {
 		if strings.TrimSpace(value) == "" {
@@ -180,13 +190,13 @@ func structure(j *Journal) error {
 		if len(group.Files) == 0 || group.Name == "" {
 			return errors.New("empty deployment group")
 		}
-		if j.Version == 1 && group.Published || j.Version == 2 && group.Done && !group.Published {
+		if j.Version == 1 && group.Published || j.Version >= 2 && group.Done && !group.Published {
 			return errors.New("invalid deployment publication progress")
 		}
 		if j.Version == 1 && group.Activation != "" || group.Reload == "" && group.Activation != "" {
 			return errors.New("unexpected activation result")
 		}
-		if j.Version == 2 && group.Reload != "" {
+		if j.Version >= 2 && group.Reload != "" {
 			switch group.Activation {
 			case "pending":
 				if group.Done {
@@ -195,6 +205,10 @@ func structure(j *Journal) error {
 			case "callback-succeeded":
 				if !group.Done {
 					return errors.New("activation result lacks completion checkpoint")
+				}
+			case "not-available":
+				if j.Version < 3 || !group.Done {
+					return errors.New("invalid callback absence result")
 				}
 			case "callback-failed", "unavailable":
 				if group.Done || !group.Published {
@@ -238,6 +252,9 @@ func structure(j *Journal) error {
 		if !filepath.IsAbs(guard.Path) || filepath.Clean(guard.Path) != guard.Path || !guard.Before.Exists {
 			return errors.New("invalid deployment configuration guard")
 		}
+		if j.Version < 3 && guard.JSONKey != "" {
+			return errors.New("scoped guard in legacy deployment journal")
+		}
 	}
 	return nil
 }
@@ -255,7 +272,7 @@ func (s *Store) checkpoint(j *Journal) error {
 
 // Prepare durably stages all content before publishing a journal. Old completed
 // stages are deliberately retained; no automatic generation or key pruning.
-func (s *Store) Prepare(j Journal, batches []Batch, guards []string, allowExisting bool) error {
+func (s *Store) Prepare(j Journal, batches []Batch, guards []Guard, allowExisting bool) error {
 	previous, err := s.Load()
 	if err != nil {
 		return err
@@ -267,7 +284,7 @@ func (s *Store) Prepare(j Journal, batches []Batch, guards []string, allowExisti
 	if err != nil {
 		return err
 	}
-	j.Version, j.Stage = 2, filepath.Base(stage)
+	j.Version, j.Stage = 3, filepath.Base(stage)
 	dirs := map[string]bool{}
 	addDir := func(path string) error {
 		if dirs[path] {
@@ -320,12 +337,13 @@ func (s *Store) Prepare(j Journal, batches []Batch, guards []string, allowExisti
 		}
 		j.Groups = append(j.Groups, group)
 	}
-	for _, path := range guards {
-		before, err := Inspect(path)
+	for _, guard := range guards {
+		before, err := ObserveGuard(guard)
 		if err != nil {
 			return err
 		}
-		j.Guards = append(j.Guards, Guard{path, before})
+		guard.Before = before
+		j.Guards = append(j.Guards, guard)
 	}
 	if err := structure(&j); err != nil {
 		return err
@@ -362,9 +380,36 @@ func checkDirectories(j *Journal) error {
 	return nil
 }
 
+// ObserveGuard can protect one DSM INFO entry without blocking independent
+// entries added to the same metadata file. File permissions remain guarded.
+func ObserveGuard(guard Guard) (Snapshot, error) {
+	now, err := Inspect(guard.Path)
+	if err != nil || !now.Exists || guard.JSONKey == "" {
+		return now, err
+	}
+	data, err := os.ReadFile(guard.Path)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	var entries map[string]json.RawMessage
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return Snapshot{}, errors.New("invalid JSON configuration guard")
+	}
+	entry, ok := entries[guard.JSONKey]
+	if !ok {
+		return Snapshot{}, errors.New("guarded JSON entry is missing")
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, entry); err != nil {
+		return Snapshot{}, err
+	}
+	now.Hash = Digest(compact.Bytes())
+	return now, nil
+}
+
 func checkGuards(j *Journal) error {
 	for _, guard := range j.Guards {
-		now, err := Inspect(guard.Path)
+		now, err := ObserveGuard(guard)
 		if err != nil {
 			return err
 		}
@@ -490,11 +535,20 @@ func (s *Store) Replay() error {
 			}
 		}
 	}
-	if j.Version == 1 {
+	if j.Version < 3 {
 		// Upgrade sequential journals before checkpointing independent results.
 		// Preserve completed groups without inferring success for pending ones.
-		j.Version = 2
+		legacy := j.Version == 1
+		if s.Upgrade != nil {
+			if err := s.Upgrade(j); err != nil {
+				return err
+			}
+		}
+		j.Version = 3
 		for i := range j.Groups {
+			if !legacy {
+				continue
+			}
 			j.Groups[i].Published = j.Groups[i].Done
 			if j.Groups[i].Reload != "" {
 				j.Groups[i].Activation = "pending"
@@ -535,7 +589,7 @@ func (s *Store) Replay() error {
 			if now != file.Before && now != file.After {
 				return fmt.Errorf("deployment conflict: %s", file.Path)
 			}
-			if now != file.After {
+			if now != file.After || j.ForcePublish && file.After.Exists {
 				if file.After.Exists {
 					blob, err := ReadPrivate(filepath.Join(s.Dir, j.Stage, fmt.Sprintf("file-%d", i)))
 					if err != nil {
@@ -593,24 +647,29 @@ func (s *Store) Replay() error {
 				return errors.New("deployment activation unavailable")
 			}
 			if err := s.Reload(group.Reload); err != nil {
-				var local *ActivationError
-				if !errors.As(err, &local) {
-					return errors.Join(activationErrors, fmt.Errorf("activate %s: %w", group.Reload, err))
+				if errors.Is(err, ErrNoActivation) {
+					group.Activation = "not-available"
+				} else {
+					var local *ActivationError
+					if !errors.As(err, &local) {
+						return errors.Join(activationErrors, fmt.Errorf("activate %s: %w", group.Reload, err))
+					}
+					activationErrors = errors.Join(activationErrors, fmt.Errorf("activate %s: %w", group.Reload, err))
+					group.Activation = "callback-failed"
+					if !local.Attempted {
+						group.Activation = "unavailable"
+					}
+					if err := s.checkpoint(j); err != nil {
+						return errors.Join(activationErrors, err)
+					}
+					continue
 				}
-				activationErrors = errors.Join(activationErrors, fmt.Errorf("activate %s: %w", group.Reload, err))
-				group.Activation = "callback-failed"
-				if !local.Attempted {
-					group.Activation = "unavailable"
-				}
-				if err := s.checkpoint(j); err != nil {
-					return errors.Join(activationErrors, err)
-				}
-				continue
+			} else {
+				group.Activation = "callback-succeeded"
 			}
 			if err := s.Boundary("reload-" + group.Reload); err != nil {
 				return err
 			}
-			group.Activation = "callback-succeeded"
 		}
 		group.Done = true
 		if err := s.checkpoint(j); err != nil {
