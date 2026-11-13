@@ -304,6 +304,20 @@ func (t *target) reserveDirectory(info map[string]json.RawMessage) (state.Direct
 	return state.Directory{}, errors.New("unable to reserve a unique six-character DSM entry ID")
 }
 
+func (t *target) InitializationPaths(generation domain.Generation) ([]string, error) {
+	if !t.automatic() {
+		return nil, nil
+	}
+	entry, err := t.readEntry(generation.CertificateID())
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	if entry != nil && entry.Registered {
+		return nil, nil
+	}
+	return []string{filepath.Join(t.archive, "INFO")}, nil
+}
+
 func (t *target) Initialize(ctx context.Context, operationID string, generation domain.Generation, boundary func(string) error) error {
 	if !t.automatic() {
 		return nil

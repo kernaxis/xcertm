@@ -219,10 +219,14 @@ func TestFilesystemLocksPendingOwnershipAndIndependentTargets(t *testing.T) {
 		t.Fatal("expected interruption")
 	}
 	first.Close()
-	if other, err := filesystem.Open(privateTempDir(t), filesystem.Config{DestinationID: "other", Directory: a}); err == nil {
-		other.Close()
-		t.Fatal("pending ownership bypassed")
+	other, err := filesystem.Open(privateTempDir(t), filesystem.Config{DestinationID: "other", Directory: a})
+	if err != nil {
+		t.Fatal(err)
 	}
+	if _, err := other.Deploy(context.Background(), "other-op", g); err == nil {
+		t.Fatal("pending file ownership bypassed")
+	}
+	other.Close()
 	if !journal(t, root, "b").Completed() || journal(t, root, "a").Completed() {
 		t.Fatal("destinations lost independent results")
 	}
@@ -317,6 +321,45 @@ func TestFilesystemMissingJournalAndCancellation(t *testing.T) {
 	}
 	if _, err := s.Recover(context.Background()); err == nil || !strings.Contains(err.Error(), "without its journal") {
 		t.Fatal("missing journal ignored")
+	}
+	if _, err := s.Republish(context.Background(), "forced", g); err == nil {
+		t.Fatal("force bypassed a marker without its journal")
+	}
+}
+
+func TestFilesystemForceCanAdoptSafeOutputsButRejectsSymlinksAndUnsafeKeyMode(t *testing.T) {
+	for _, kind := range []string{"safe", "symlink", "unsafe-key-mode"} {
+		t.Run(kind, func(t *testing.T) {
+			root, dir := privateTempDir(t), t.TempDir()
+			keyPath := filepath.Join(dir, "privkey.pem")
+			if kind == "symlink" {
+				if err := os.Symlink(filepath.Join(t.TempDir(), "outside"), keyPath); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				mode := os.FileMode(0600)
+				if kind == "unsafe-key-mode" {
+					mode = 0644
+				}
+				write(t, keyPath, []byte("external key"), mode)
+			}
+			write(t, filepath.Join(dir, "fullchain.pem"), []byte("external certificate"), 0600)
+			s, err := filesystem.Open(root, filesystem.Config{DestinationID: "web", Directory: dir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			g := generation(t, "g1", false)
+			r, err := s.Republish(context.Background(), "forced", g)
+			if kind == "safe" {
+				if err != nil || !r.Completed {
+					t.Fatalf("safe adoption failed: %+v, %v", r, err)
+				}
+				checkPublished(t, dir, g, true)
+			} else if err == nil {
+				t.Fatal("force bypassed path or key-metadata safety")
+			}
+		})
 	}
 }
 

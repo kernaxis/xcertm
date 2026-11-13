@@ -74,6 +74,9 @@ reload scripts. Keep the store: its ID mapping is necessary for reuse/recovery.
 `renew_before` accepts a positive Go duration or days, such as `480h` or `20d`.
 For renewal of an existing certificate it must be smaller than its lifetime.
 The default window is the final third of the certificate's actual lifetime.
+Renewal is due at or after the exact threshold instant; displayed durations do
+not determine the decision. `renew` logs remaining validity, the effective
+threshold and the reason for a required or skipped renewal.
 
 ## Credentials
 
@@ -167,7 +170,8 @@ xcertm deploy --config xcertm.yaml --certificate web --destination nas-main
   same SAN set. `--deploy` also publishes it. No destination is needed to issue
   without deployment.
 - `renew` checks the renewal window before issuing. An absent generation is
-  issued. `--deploy` also publishes a generation that is not yet due.
+  issued. `--deploy` updates destinations that need the selected generation;
+  verified up-to-date destinations are skipped without publication or callbacks.
 - `--force` explicitly requests a new issuance for `issue` or `renew`, with a
   fresh key. Recovery of an unfinished deployment takes priority even with this flag.
 - `deploy` uses the latest stored generation in the selected environment and
@@ -207,6 +211,7 @@ one selected destination; YAML defines multiple different destinations convenien
 | Repeatable `--destination`, `--type`, `--directory`, `--key-file`, `--certificate-file` | Filesystem destination selection/settings. |
 | `--dsm-default`, `--dsm-certificate-id` | Existing local DSM entry selection; omit both to create a dedicated managed entry. |
 | `--deploy`, `--force`, `--renew-before` | Issuance/renewal and optional publication policy. |
+| `deploy --force` | Republish stored material and rerun callbacks, without issuing or discarding pending work. |
 | Repeatable `--resolver`, `--propagation-timeout` | DNS lookup selection; default propagation deadline `2m`. |
 | `--timeout` | Whole lifecycle command deadline, default `10m`. |
 | `--json` | Public results as JSON on stdout. Progress and diagnostics stay on stderr; errors exit nonzero. |
@@ -257,10 +262,22 @@ HTTP 429 retry deadlines are persisted; retry after the indicated time.
 
 An interrupted deployment retains its original destination parameters and key
 material. Use `deploy` with that certificate/destination to reconcile it; another
-issuance is blocked while known deployment work remains unfinished. If an
-`issue --deploy` invocation recovers pending deployments, it reports `recovered`
-and returns without issuing; run `renew` again when ready to evaluate renewal.
-A different generation can require another `deploy` after pinned work completes.
+issuance is blocked while known deployment work remains unfinished. With
+`issue --deploy` or `renew --deploy`, recovery is followed by the normal issuance
+or renewal decision. A recovery failure alone never causes another issuance.
+Independent selected destinations can still receive the latest stored generation.
+Successful recovery without an issuance reports `recovered`.
+
+`--force` on `issue`/`renew` requests a new generation after successful recovery.
+On `deploy`, it creates a fresh publication of stored material and reruns the
+callbacks; there is no ACME or DNS request. It permits overwriting ordinary file
+drift or explicitly adopting existing filesystem outputs, while preserving
+safe paths, binding and private-key metadata checks. Pending journals and orphan
+markers are never discarded. If work is actually pending, `deploy --force`
+recovers it first; repeat the command after completion to force publication.
+Ordinary deployments reuse the completed operation identity even after a forced
+deployment, so a scheduled renewal does not republish it again. Successful
+verification returns `unchanged: true` in the deployment result JSON.
 
 Automatic DSM entry creation has a separate durable mapping and registration
 record. Retry with the same store, destination, certificate and generation;

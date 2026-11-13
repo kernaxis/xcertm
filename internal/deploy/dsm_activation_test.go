@@ -4,7 +4,6 @@ package deploy_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -38,7 +37,7 @@ func TestDSMActivationFailuresDoNotBlockOtherServices(t *testing.T) {
 	}
 	s.Close()
 	j := journal(t, l.state, "nas")
-	if j.Version != 2 || j.Groups[1].Done || j.Groups[2].Done || !j.Groups[3].Done {
+	if j.Version != 3 || j.Groups[1].Done || j.Groups[2].Done || !j.Groups[3].Done {
 		t.Fatal("independent service results not checkpointed")
 	}
 	if len(r.Services) != 3 || !r.Services[0].FilesPublished || r.Services[0].Activation != "callback-failed" || r.Services[2].Activation != "callback-succeeded" {
@@ -147,11 +146,7 @@ func TestDSMLegacyPendingJournalKeepsCompletedServices(t *testing.T) {
 		j.Groups[i].Published = false
 		j.Groups[i].Activation = ""
 	}
-	data, err := json.Marshal(j)
-	if err != nil {
-		t.Fatal(err)
-	}
-	write(t, filepath.Join(journalDir(l.state, "nas"), "current.json"), data, 0600)
+	writeLegacyJournal(t, l, j, 1)
 	write(t, filepath.Join(l.scriptDir, "fail-svc2"), nil, 0600)
 	restarted, err := dsm.Open(l.state, l.config)
 	if err != nil {

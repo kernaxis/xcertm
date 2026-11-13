@@ -56,6 +56,13 @@ empty result. A successful result identifies operation, destination, managed
 certificate, and generation; `Completed` is true only after successful completion
 verification. Errors preserve the latest receipt or pending operation.
 
+`Republish` takes a new operation ID and validated generation. It bypasses the
+old completed receipt's content comparison and prepares a fresh journal, even
+for an identical generation. Existing pending journals must still be recovered.
+All present files are re-observed, safe metadata is retained, and staged files
+are republished before callbacks run. Completed ordinary retries return
+`Unchanged` without rewriting material or repeating callbacks.
+
 One session is used serially. Separate destinations can have independent results
 and sessions; resources that overlap are serialized. There is no transaction
 across destinations. A failed deployment never requests a new certificate.
@@ -66,8 +73,9 @@ The destination directory must already exist. Output defaults are `privkey.pem`
 (unencrypted PKCS#8 PEM) and `fullchain.pem` (leaf followed by the supplied chain).
 Names can be configured as distinct direct child filenames; reserved `.xcertm*`
 names and path traversal are rejected. New files have mode `0600` and the
-executing user's UID/GID. A first deployment refuses existing managed output
-files; an adoption/overwrite workflow is not implemented. Unrelated files are
+executing user's UID/GID. A first ordinary deployment refuses existing managed
+output files; explicit forced publication can adopt them if their metadata
+meets the adapter's safety rules. Unrelated files are
 left untouched. Subsequent deployments require the previous observed contents
 and metadata to remain unchanged. There is no service activation.
 
@@ -134,6 +142,11 @@ profiles without a unique exact match are reported as ambiguous, not guessed.
 The `owner` field denotes certificate file ownership; it is not used as a
 package or systemd unit name.
 
+When no TLS profile is declared, `certificate-config.reloader-relpath`, if
+present, is used with the certificate service argument, as for the historical
+certificate hook. It is not followed by legacy callbacks. No extra flags or
+systemd units are guessed for native executables.
+
 The reloader must resolve to a regular executable inside the package's resolved
 `target` directory. DSM's package-target symlinks are supported, but path
 traversal and executable symlinks escaping that target are rejected. A declared
@@ -141,14 +154,22 @@ TLS reloader replaces the historical hooks; it is not followed by them. This
 avoids calling a package-starting certificate hook before a native TLS reloader
 that already handles an inactive service with `try-restart`.
 
-If there is no package resource file or no TLS profile declaration, the legacy
+If there is no declared package reloader, the legacy
 activation path remains available: search `usr/libexec/certificate.d`,
 `usr/local/libexec/certificate.d`, `usr/syno/share/certificate.d`, then
 `usr/local/share/certificate.d`, and call the first subscriber script with the
 service argument. If present, additionally call
 `usr/libexec/security-profile/tls-profile/<subscriber>.sh` without arguments;
 `system/default` uses `dsm.sh`. Malformed, ambiguous or unavailable declared TLS
-reloaders produce an error without falling back to the legacy hooks.
+reloaders produce an error without falling back to the legacy hooks. The same
+validation applies to declared certificate reloaders.
+
+If a package explicitly registers the certificate service but declares no
+reloader and no legacy callback is found, publication completes with
+`activation=not-available`. This records that no callback was executed; it makes
+no claim about whether a reload is required or how the process reads its files.
+Missing package metadata, an unregistered service or a broken declared callback
+remains `unavailable`, rather than being mistaken for an intentional absence.
 
 Programs are invoked directly without shell interpolation, with a 30-second
 context timeout per service. Raw script output is discarded because it can
@@ -162,7 +183,8 @@ processing. Published files are checked before each callback so a hook cannot
 silently change certificate material subsequently used by another service.
 
 `deploy`, `show` and their JSON output distinguish `files_published` from
-`activation`: `pending`, `callback-succeeded`, `callback-failed`, or `unavailable`.
+`activation`: `pending`, `callback-succeeded`, `callback-failed`, `unavailable`,
+or `not-available` (publication complete, no callback available).
 A successful callback is not proof that a process is active or serves this
 certificate. XCertM delegates reload behavior to DSM; legacy scripts can still
 start services according to the vendor's implementation. It does not infer unit
@@ -175,7 +197,13 @@ but before its checkpoint. With no assigned services, only the archive is
 published.
 
 DSM uses `.xcertm.lock` in the certificate archive to serialize XCertM
-deployments across destinations and stores. It coordinates only XCertM;
+processes across destinations and stores. Durable pending claims reserve only
+their concrete output paths. Independent entries can progress between retries;
+overlapping archive/service files remain reserved until their operation completes.
+The INFO guard covers the selected entry, so unrelated entry registration does
+not invalidate a pending operation. The default selector retains its DEFAULT
+guard. Relevant assignment/metadata changes still stop recovery.
+The lock coordinates only XCertM;
 DSM and other certificate tools do not participate in this advisory lock.
 Avoid concurrent certificate changes by those tools. Changing assignments
 and remote DSM APIs are outside this implementation.
@@ -193,23 +221,26 @@ destination ID maps to its own `deployments/<SHA-256-of-ID>` directory, with:
 - `operation-*`: staged immutable contents (`0700`, files `0600`).
 - `.lock`: a retained destination lock file.
 
-New deployment journals use version 2 to record publication and independent
-activation results. Version 1 completed receipts remain readable without
-replaying callbacks. Pending version 1 journals are validated and upgraded under
-the existing locks, preserving recorded successes and the original generation.
+New deployment journals use version 3 for scoped configuration guards, forced
+publication and callback-absence results. Version 1 and 2 completed receipts
+remain readable without replaying callbacks. Pending legacy journals are
+preflighted using their original whole-file guards before upgrading under the
+existing locks. Recorded successes, original generation and stage are retained.
 No initial/live service state is reconstructed from an old failure. Keep using
-the new binary once a version 2 journal is written; older binaries cannot read
-that format. No stage or key is removed by this migration.
+the new binary once version 3 journals or the ownership registry are written;
+older binaries cannot read those formats. No stage or key is removed.
 
 The receipt also retains the generation's explicit source/reference and its
 original validation instant, independently of ACME. Reusing a recorded generation
 identity with different material or provenance is rejected.
 
-The resource has a retained lock file and a `.xcertm-pending` marker pointing to
-the owning store/operation. This prevents another state root or destination from
-overwriting unfinished work after process loss. A marker without its journal, or
-with a different operation identity, requires manual recovery. Do not remove
-markers to bypass unresolved state.
+The resource has a retained lock file and a `.xcertm-pending` ownership registry
+containing each pending store/operation and its reserved file paths. Claim and
+release updates are atomic under the resource lock, and completing one operation
+does not release another operation's claims. Legacy exclusive markers are scoped
+from their matching, intact journal; an orphan or inconsistent legacy marker
+requires manual recovery. New claims with missing journals also remain protected.
+Do not remove markers to bypass unresolved state.
 
 Before publication, all contents and the journal are synchronized durably. Replay
 preflights all files and staged blobs. Every destination must match its recorded

@@ -165,7 +165,7 @@ func (t *target) Plan(g domain.Generation) (deploy.Plan, error) {
 	if err != nil {
 		return deploy.Plan{}, err
 	}
-	plan := deploy.Plan{Target: id, AllowExisting: true, Guards: []string{filepath.Join(t.archive, "INFO")}}
+	plan := deploy.Plan{Target: id, AllowExisting: true, Guards: []state.Guard{{Path: filepath.Join(t.archive, "INFO"), JSONKey: id}}}
 	if t.automatic() {
 		journal, err := state.Inspect(filepath.Join(t.stateDir, "current.json"))
 		if err != nil {
@@ -174,7 +174,7 @@ func (t *target) Plan(g domain.Generation) (deploy.Plan, error) {
 		plan.AllowExisting = journal.Exists
 	}
 	if t.config.UseDefault {
-		plan.Guards = append(plan.Guards, filepath.Join(t.archive, "DEFAULT"))
+		plan.Guards = append(plan.Guards, state.Guard{Path: filepath.Join(t.archive, "DEFAULT")})
 	}
 	batch := func(name, dir, reload string) state.Batch {
 		return state.Batch{Name: name, Reload: reload, Files: []state.Content{
@@ -234,8 +234,14 @@ func (t *target) Validate(j *state.Journal) error {
 	if len(j.Guards) != guardCount || j.Guards[0].Path != filepath.Join(t.archive, "INFO") {
 		return errors.New("invalid DSM configuration guards")
 	}
+	if j.Version >= 3 && j.Guards[0].JSONKey != j.Target || j.Version < 3 && j.Guards[0].JSONKey != "" {
+		return errors.New("invalid DSM entry guard")
+	}
 	if guardCount == 2 && j.Guards[1].Path != filepath.Join(t.archive, "DEFAULT") {
 		return errors.New("invalid DSM default guard")
+	}
+	if guardCount == 2 && j.Guards[1].JSONKey != "" {
+		return errors.New("invalid DSM default guard scope")
 	}
 	for groupIndex, group := range j.Groups {
 		name, dir, reload := "archive", filepath.Join(t.archive, j.Target), ""
@@ -263,5 +269,17 @@ func (t *target) Validate(j *state.Journal) error {
 			}
 		}
 	}
+	return nil
+}
+
+// Upgrade runs only after the legacy whole-file guards have been checked.
+func (t *target) Upgrade(j *state.Journal) error {
+	guard := &j.Guards[0]
+	guard.JSONKey = j.Target
+	before, err := state.ObserveGuard(*guard)
+	if err != nil {
+		return err
+	}
+	guard.Before = before
 	return nil
 }

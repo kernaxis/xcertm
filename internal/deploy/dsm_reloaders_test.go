@@ -192,6 +192,58 @@ func TestDSMNativeTLSExactMatchAndLegacyFallback(t *testing.T) {
 	}
 }
 
+func TestDSMDeclaredPackageWithoutCallbackCompletesWithoutClaimingActivation(t *testing.T) {
+	for _, name := range []string{"PackageWithoutHook", "AnotherPackageWithoutHook"} {
+		t.Run(name, func(t *testing.T) {
+			l, _ := packageDSM(t, name, `{"certificate-config":{"services":[{"service":"endpoint"}]}}`)
+			if err := os.Remove(filepath.Join(l.root, "usr/local/share/certificate.d", name)); err != nil {
+				t.Fatal(err)
+			}
+			var progress strings.Builder
+			l.config.Progress = func(message string) { progress.WriteString(message + "\n") }
+			s, err := dsm.Open(l.state, l.config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			r, err := s.Deploy(context.Background(), "op", generation(t, "g1", false))
+			if err != nil || !r.Completed || r.Services[0].Activation != "not-available" || !r.Services[0].FilesPublished {
+				t.Fatalf("callback absence was not recorded accurately: %+v, %v", r, err)
+			}
+			if !strings.Contains(progress.String(), "files published without service activation") || count(l.calls(t), "svc2") != 1 {
+				t.Fatal("callback absence was hidden or blocked independent activation")
+			}
+			if r, err := s.Recover(context.Background()); err != nil || r.Services[0].Activation != "not-available" || count(l.calls(t), "svc2") != 1 {
+				t.Fatalf("recorded callback absence did not survive recovery: %+v, %v", r, err)
+			}
+		})
+	}
+}
+
+func TestDSMCertificateReloaderUsesDeclaredExecutableAndRetainsExitFailure(t *testing.T) {
+	l, target := packageDSM(t, "CertificateHookPackage", `{"certificate-config":{"reloader-relpath":"tool/cert-reload","services":[{"service":"endpoint"}]}}`)
+	write(t, filepath.Join(target, "tool/cert-reload"), []byte("#!/bin/sh\n[ \"$1\" = endpoint ] || exit 8\necho invoked >> \"${0%/*}/calls\"\nif [ -f \"${0%/*}/fail\" ]; then exit 255; fi\n"), 0700)
+	write(t, filepath.Join(target, "tool/fail"), nil, 0600)
+	s, err := dsm.Open(l.state, l.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	r, err := s.Deploy(context.Background(), "op", generation(t, "g1", false))
+	if err == nil || !strings.Contains(err.Error(), "exit status 255") || r.Services[0].Activation != "callback-failed" || r.Services[1].Activation != "callback-succeeded" {
+		t.Fatalf("native failure was masked or blocked others: %+v, %v", r, err)
+	}
+	if _, err := os.Stat(filepath.Join(l.root, "usr/local/share/certificate.d/calls")); !os.IsNotExist(err) {
+		t.Fatal("declared certificate callback fell back to historical hook")
+	}
+	if err := os.Remove(filepath.Join(target, "tool/fail")); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := s.Recover(context.Background()); err != nil || !r.Completed || count(l.calls(t), "svc2") != 1 {
+		t.Fatalf("certificate callback recovery failed: %+v, %v", r, err)
+	}
+}
+
 func TestDSMLegacyPendingOperationCanResumeWithDeclaredTLSReloader(t *testing.T) {
 	l, target := packageDSM(t, "ExamplePackage", singleTLSResource)
 	s, err := dsm.Open(l.state, l.config)
@@ -215,11 +267,7 @@ func TestDSMLegacyPendingOperationCanResumeWithDeclaredTLSReloader(t *testing.T)
 		j.Groups[i].Published = false
 		j.Groups[i].Activation = ""
 	}
-	data, err := json.Marshal(j)
-	if err != nil {
-		t.Fatal(err)
-	}
-	write(t, filepath.Join(journalDir(l.state, "nas"), "current.json"), data, 0600)
+	writeLegacyJournal(t, l, j, 1)
 	restarted, err := dsm.Open(l.state, l.config)
 	if err != nil {
 		t.Fatal(err)

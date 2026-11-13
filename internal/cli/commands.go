@@ -80,6 +80,8 @@ func lifecycleCommands() []*urfave.Command {
 		flags := append(selectionFlags(), destinationFlags()...)
 		if name != "deploy" {
 			flags = append(flags, issuanceFlags()...)
+		} else {
+			flags = append(flags, &urfave.BoolFlag{Name: "force", Usage: "Republish stored material and rerun callbacks; never discard unfinished work"})
 		}
 		commands = append(commands, &urfave.Command{Name: name, Usage: map[string]string{"issue": "Obtain and store a certificate generation", "renew": "Renew certificates when due", "deploy": "Deploy an already stored certificate generation"}[name], Flags: flags, Action: func(ctx context.Context, c *urfave.Command) error { return runLifecycle(ctx, c, name) }})
 	}
@@ -289,7 +291,7 @@ func runLifecycle(ctx context.Context, c *urfave.Command, action string) error {
 	if err != nil {
 		return err
 	}
-	options := app.Options{Resolver: resolver, PropagationTimeout: c.Duration("propagation-timeout")}
+	options := app.Options{Resolver: resolver, PropagationTimeout: c.Duration("propagation-timeout"), ForceDeploy: action == "deploy" && c.Bool("force")}
 	if action != "deploy" && c.Duration("propagation-timeout") <= 0 {
 		return errors.New("propagation-timeout must be positive")
 	}

@@ -57,7 +57,7 @@ use the generated files and reload it yourself.
 | Renew certificates when needed and install them | `sudo xcertm renew --config ./xcertm.yaml --all --deploy` |
 | List your certificates | `sudo xcertm list` |
 | See details for a certificate | `sudo xcertm show web` |
-| Install an already obtained certificate again | `sudo xcertm deploy --config ./xcertm.yaml --certificate web` |
+| Deploy a stored certificate where needed | `sudo xcertm deploy --config ./xcertm.yaml --certificate web` |
 
 Schedule the renewal command with DSM Task Scheduler or cron to check regularly.
 XCertM does not run in the background. See the [usage guide](docs/usage.md#renew-and-inspect)
