@@ -332,6 +332,7 @@ func (a *Service) deploySelected(ctx context.Context, s *store.Store, r config.R
 		}
 		d := store.Deployment{ID: id, CertificateID: r.ID, GenerationID: g.ID(), Environment: r.ACME.Environment, OperationID: g.ID() + ":" + id, Destination: r.Destinations[id]}
 		force := a.options.ForceDeploy
+		newForcedOperation := force
 		if old, ok := byID[id]; ok {
 			if old.CertificateID != r.ID {
 				combined = errors.Join(combined, fmt.Errorf("destination %q belongs to another certificate", id))
@@ -343,23 +344,28 @@ func (a *Service) deploySelected(ctx context.Context, s *store.Store, r config.R
 					continue
 				}
 				pending := true
+				var receipt deploy.Result
 				if force {
-					receipt, err := deploy.Inspect(a.Root, id)
+					receipt, err = deploy.Inspect(a.Root, id)
 					if err != nil {
 						combined = errors.Join(combined, err)
 						continue
 					}
-					pending = receipt.OperationID != "" && !receipt.Completed
+					// Missing or older receipts cannot prove initialization finished.
+					pending = receipt.OperationID != old.OperationID || !receipt.Completed
 				}
 				if pending {
 					d = old
-					force = false
+					newForcedOperation = false
+					// Before a journal exists, preserve the initialization identity
+					// while still allowing explicit adoption of safe output files.
+					force = force && receipt.OperationID == ""
 				}
 			} else if old.Environment == d.Environment && old.GenerationID == d.GenerationID {
 				d.OperationID = old.OperationID
 			}
 		}
-		if force {
+		if newForcedOperation {
 			operationID, err := store.NewID()
 			if err != nil {
 				combined = errors.Join(combined, err)

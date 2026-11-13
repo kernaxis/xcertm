@@ -164,6 +164,39 @@ func TestDeployForceCLIRepairsDriftAndSubsequentRenewSkips(t *testing.T) {
 	}
 }
 
+func TestForcedDeployCanAdoptOutputsAfterFirstPreparationFailed(t *testing.T) {
+	credentials(t)
+	l := newLaboratory(t)
+	root, dir := filepath.Join(t.TempDir(), "state"), t.TempDir()
+	r := request("cloudflare", dir)
+	options := l.options()
+	first, err := app.New(root, options).Issue(context.Background(), r, app.RunOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "fullchain.pem")
+	if err := os.WriteFile(path, []byte("untracked output"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.New(root, options).Deploy(context.Background(), r); err == nil {
+		t.Fatal("ordinary deployment adopted existing outputs")
+	}
+	s, err := store.Open(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.Deployments(r.ID)
+	s.Close()
+	if err != nil || len(pending) != 1 || pending[0].Completed {
+		t.Fatal("failed preparation lost its recorded request", err)
+	}
+	options.ForceDeploy = true
+	out, err := app.New(root, options).Deploy(context.Background(), r)
+	if err != nil || len(out.Deployments) != 1 || !out.Deployments[0].Completed || out.Deployments[0].OperationID != pending[0].OperationID || out.GenerationID != first.GenerationID || l.finalizations != 1 {
+		t.Fatalf("force could not adopt outputs using the original operation: %+v, %v", out, err)
+	}
+}
+
 func TestRenewEvaluatesDeadlineAfterRecoveringDeployment(t *testing.T) {
 	for _, force := range []bool{false, true} {
 		t.Run(map[bool]string{false: "due", true: "forced"}[force], func(t *testing.T) {
